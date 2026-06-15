@@ -1,0 +1,51 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The generic data point interface of the Data Standard. A producer
+-- implements `PublishedData` on its own template to publish arbitrary
+-- key/value market data; a consumer reads it through the interface without
+-- depending on the producer's package.
+module DataStandard.DataPointV1 where
+
+import DataStandard.Utils (Metadata, Values)
+
+-- | The on-ledger view every `PublishedData` implementation exposes. A
+-- consumer reads only these fields, and is therefore decoupled from the
+-- template that produced them.
+data PublishedDataView = PublishedDataView with
+    distributor : Party
+      -- ^ The party that published the data, and whom the consumer chooses to
+      -- trust as its source.
+    publishedAt : Time
+      -- ^ When the provider produced the data, which is not necessarily when
+      -- the contract was created.
+    schemaVersion : Text
+      -- ^ Version of the `values` schema, using semantic versioning. It
+      -- describes a given feed's payload and evolves per provider,
+      -- independently of the interface version in this package's name.
+    values : Values
+      -- ^ The data point's payload, as a map of field names to tagged values.
+    metadata : Metadata
+      -- ^ Additive annotations that are not part of the data itself; see
+      -- `Metadata`. `emptyMetadata` when the provider has nothing to attach.
+  deriving (Eq, Show)
+
+-- | The generic data point interface. A provider implements it on its own
+-- template; consumers read the view through it and never import the provider's
+-- package, so switching providers is a configuration change rather than a
+-- recompile.
+interface PublishedData where
+  viewtype PublishedDataView
+
+  -- | Read the view from a contract the caller can see. This is the read path
+  -- for a party that is not a stakeholder of the contract: such a party
+  -- obtains the contract through explicit disclosure, which grants visibility
+  -- but not the authority to `fetch`, and so reads by exercising this choice,
+  -- which is authorised by the caller alone. It is nonconsuming and returns
+  -- the view, never the implementing template.
+  nonconsuming choice PublishedData_Fetch : PublishedDataView
+    with
+      actor : Party
+        -- ^ The party reading the data, and the sole controller of the choice.
+    controller actor
+    do pure (view this)

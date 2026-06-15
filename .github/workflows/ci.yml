@@ -1,0 +1,41 @@
+# Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The installer fetches the latest dpm release; the SDK the packages
+      # build with is pinned in the next step.
+      - name: Install dpm
+        run: |
+          curl -sSL https://get.digitalasset.com/install/install.sh | sh
+          echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
+
+      - name: Install pinned Daml SDK
+        run: dpm install 3.4.11
+
+      - name: Check headers, build, validate and test
+        run: make ci
+
+      - name: Publish interface DARs as build artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: canton-data-standard-dars
+          path: interfaces/*/.daml/dist/*.dar
+          include-hidden-files: true
+          if-no-files-found: error

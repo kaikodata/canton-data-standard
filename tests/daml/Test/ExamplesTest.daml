@@ -1,0 +1,111 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | End-to-end tests over the reference producer and consumer, exercising the
+-- standard the way an external implementer would.
+module Test.ExamplesTest where
+
+import DA.Assert ((===))
+import DA.Optional (isNone)
+import DA.Time (addRelTime, minutes)
+import Daml.Script
+
+import DataConsumer.Trading
+import DataProducer.PriceOracle
+import DataStandard.DataPointV1 (PublishedData)
+import DataStandard.Utils (emptyMetadata)
+import Test.Fixtures
+
+testConsumerTradesOffProducersPrice : Script ()
+testConsumerTradesOffProducersPrice = do
+  oracle <- allocateParty "ExampleOracle"
+  seller <- allocateParty "Seller"
+  buyer  <- allocateParty "Buyer"
+  now    <- getTime
+  priceCid <- submit oracle $ createCmd PublishedPrice with
+    oracle, assetPair = "BTC/USD", price = 65000.0, at = now
+  offerCid <- submit seller $ createCmd TradeOffer with
+    seller, buyer, assetPair = "BTC/USD", quantity = 0.5
+    priceDataCid = toInterfaceContractId @PublishedData priceCid
+  Some disc <- queryDisclosure oracle priceCid
+  settlementCid <- submit (actAs buyer <> disclose disc) $
+    exerciseCmd offerCid AcceptTrade
+  Some s <- queryContractId buyer settlementCid
+  s.price       === 65000.0
+  s.totalAmount === 32500.0
+  s.distributor === oracle
+
+testConsumerRejectsWrongAssetPair : Script ()
+testConsumerRejectsWrongAssetPair = do
+  oracle <- allocateParty "ExampleOracle"
+  seller <- allocateParty "Seller"
+  buyer  <- allocateParty "Buyer"
+  now    <- getTime
+  priceCid <- submit oracle $ createCmd PublishedPrice with
+    oracle, assetPair = "ETH/USD", price = 3200.0, at = now
+  offerCid <- submit seller $ createCmd TradeOffer with
+    seller, buyer, assetPair = "BTC/USD", quantity = 0.5
+    priceDataCid = toInterfaceContractId @PublishedData priceCid
+  Some disc <- queryDisclosure oracle priceCid
+  submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade) "asset pair mismatch"
+
+testUpdateRequiresIncreasingTime : Script ()
+testUpdateRequiresIncreasingTime = do
+  oracle <- allocateParty "ExampleOracle"
+  now    <- getTime
+  priceCid <- submit oracle $ createCmd PublishedPrice with
+    oracle, assetPair = "BTC/USD", price = 65000.0, at = now
+  submitFailsWithNoDisclosure oracle
+    (exerciseCmd priceCid UpdatePrice with newPrice = 66000.0, newAt = now)
+    "publication time must increase"
+
+-- TestFeed is a valid PublishedData implementation with a different schema:
+-- it carries no "assetPair" field.
+testConsumerRejectsForeignSchema : Script ()
+testConsumerRejectsForeignSchema = do
+  oracle <- allocateParty "ExampleOracle"
+  seller <- allocateParty "Seller"
+  buyer  <- allocateParty "Buyer"
+  now    <- getTime
+  feedCid <- submit oracle $ createCmd TestFeed with
+    oracle, subscriber = oracle, feedId = "eurc-usd", rate = 1.0432, at = now
+    meta = emptyMetadata
+  offerCid <- submit seller $ createCmd TradeOffer with
+    seller, buyer, assetPair = "BTC/USD", quantity = 0.5
+    priceDataCid = toInterfaceContractId @PublishedData feedCid
+  Some disc <- queryDisclosure oracle feedCid
+  submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade)
+    "published data missing field: assetPair"
+
+testProducerUpdatesPrice : Script ()
+testProducerUpdatesPrice = do
+  oracle <- allocateParty "ExampleOracle"
+  now    <- getTime
+  priceCid <- submit oracle $ createCmd PublishedPrice with
+    oracle, assetPair = "BTC/USD", price = 65000.0, at = now
+  newCid <- submit oracle $ exerciseCmd priceCid UpdatePrice with
+    newPrice = 66000.0, newAt = addRelTime now (minutes 1)
+  old <- queryContractId oracle priceCid
+  assertMsg "stale publication must be archived" (isNone old)
+  Some v <- queryInterfaceContractId oracle
+    (toInterfaceContractId @PublishedData newCid)
+  v.publishedAt === addRelTime now (minutes 1)
+
+-- An offer snapshots a specific contract id, so a producer refresh archives
+-- it and the late accept fails outright instead of trading on stale data.
+testAcceptFailsAfterPriceRefresh : Script ()
+testAcceptFailsAfterPriceRefresh = do
+  oracle <- allocateParty "ExampleOracle"
+  seller <- allocateParty "Seller"
+  buyer  <- allocateParty "Buyer"
+  now    <- getTime
+  priceCid <- submit oracle $ createCmd PublishedPrice with
+    oracle, assetPair = "BTC/USD", price = 65000.0, at = now
+  offerCid <- submit seller $ createCmd TradeOffer with
+    seller, buyer, assetPair = "BTC/USD", quantity = 0.5
+    priceDataCid = toInterfaceContractId @PublishedData priceCid
+  Some disc <- queryDisclosure oracle priceCid
+  _ <- submit oracle $ exerciseCmd priceCid UpdatePrice with
+    newPrice = 66000.0, newAt = addRelTime now (minutes 1)
+  submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade)
+    "Could not find contract"

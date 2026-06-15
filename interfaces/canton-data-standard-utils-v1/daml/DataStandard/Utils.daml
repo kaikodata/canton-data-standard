@@ -1,0 +1,137 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Shared value types for the Data Standard's payloads. Every Data Standard
+-- interface package depends on this package, as do the applications that
+-- implement or consume those interfaces.
+module DataStandard.Utils where
+
+import DA.TextMap (TextMap)
+import qualified DA.TextMap as TM
+
+-- | The closed, recursive set of values that may appear in a `Values` payload.
+-- The set is the scalars plus an ordered list and a string-keyed map, so a
+-- value can nest other values and a structured payload such as an index's
+-- constituents is expressible. The Data Standard, not individual producers,
+-- governs which constructors exist.
+--
+-- Signature-based delivery reconstructs payload bytes on-ledger, so every value
+-- has a single canonical serialization. Map keys are serialized in a fixed
+-- sorted order, so the same payload always produces the same bytes regardless
+-- of the order in which fields were inserted.
+data AnyValue
+  = AVInt Int
+  | AVDecimal Decimal
+  | AVText Text
+  | AVTime Time
+  | AVBool Bool
+  | AVList [AnyValue]
+  | AVMap (TextMap AnyValue)
+  deriving (Eq, Show)
+
+-- | A data point's payload: a map from field name to tagged value. The field
+-- names a given feed is expected to carry, and their types, are defined by the
+-- `schemaVersion` on the view that exposes the payload.
+type Values = TextMap AnyValue
+
+-- | Conversion of a native Daml value into its `AnyValue` tag. An instance
+-- exists for each type the closed set supports, which lets `insertField`
+-- accept a native value without the caller naming a constructor.
+class ToAnyValue a where
+  toAny : a -> AnyValue
+
+-- | Recovery of a native Daml value from its `AnyValue` tag. Returns `None`
+-- when the tag holds a different type, so a consumer asking for the wrong type
+-- receives `None` rather than a silently coerced value.
+class FromAnyValue a where
+  fromAny : AnyValue -> Optional a
+
+instance ToAnyValue Int where toAny = AVInt
+instance FromAnyValue Int where
+  fromAny (AVInt i) = Some i
+  fromAny _         = None
+
+instance ToAnyValue Decimal where toAny = AVDecimal
+instance FromAnyValue Decimal where
+  fromAny (AVDecimal d) = Some d
+  fromAny _             = None
+
+instance ToAnyValue Text where toAny = AVText
+instance FromAnyValue Text where
+  fromAny (AVText t) = Some t
+  fromAny _          = None
+
+instance ToAnyValue Time where toAny = AVTime
+instance FromAnyValue Time where
+  fromAny (AVTime t) = Some t
+  fromAny _          = None
+
+instance ToAnyValue Bool where toAny = AVBool
+instance FromAnyValue Bool where
+  fromAny (AVBool b) = Some b
+  fromAny _          = None
+
+instance ToAnyValue AnyValue where toAny = identity
+instance FromAnyValue AnyValue where fromAny = Some
+
+instance ToAnyValue a => ToAnyValue [a] where
+  toAny xs = AVList (map toAny xs)
+instance FromAnyValue a => FromAnyValue [a] where
+  fromAny (AVList xs) = sequenceOptional (map fromAny xs)
+  fromAny _           = None
+
+instance ToAnyValue a => ToAnyValue (TextMap a) where
+  toAny m =
+    let kvs  = TM.toList m
+        kvs' = map (\(k, v) -> (k, toAny v)) kvs
+    in AVMap (TM.fromList kvs')
+instance FromAnyValue a => FromAnyValue (TextMap a) where
+  fromAny (AVMap m) = traverseTextMap fromAny m
+  fromAny _         = None
+
+-- | Extensibility metadata carried by every Data Standard view.
+--
+-- Metadata is the channel for additive evolution: a producer attaches new
+-- annotations as entries here rather than by changing a view's shape, so a
+-- consumer that does not recognise a key ignores it and is never broken by the
+-- addition. Keys SHOULD be prefixed with the DNS name of the application that
+-- defines them (for example, "exampleoracle.com/source"), following the
+-- convention the Canton token standard uses for its own metadata. Entries
+-- SHOULD be kept small, because on-ledger data is costly.
+data Metadata = Metadata with
+    values : TextMap Text
+  deriving (Eq, Show)
+
+-- | Metadata carrying no annotations; the conventional contents of a view's
+-- `metadata` field when the provider has nothing to attach.
+emptyMetadata : Metadata
+emptyMetadata = Metadata with values = TM.empty
+
+-- | Turn a list of `Optional` into an `Optional` list, yielding `None` if any element is `None`.
+sequenceOptional : [Optional a] -> Optional [a]
+sequenceOptional = foldr go (Some [])
+  where
+    go ox oacc = case (ox, oacc) of
+      (Some x, Some acc) -> Some (x :: acc)
+      _                  -> None
+
+-- | Apply an `Optional`-returning function to every value of a `TextMap`, yielding `None` if any application is `None`.
+traverseTextMap : (a -> Optional b) -> TextMap a -> Optional (TextMap b)
+traverseTextMap f m =
+  let pairs = TM.toList m
+  in case sequenceOptional [ mapPair k <$> f v | (k, v) <- pairs ] of
+       Some kvs -> Some (TM.fromList kvs)
+       None     -> None
+  where
+    mapPair : Text -> b -> (Text, b)
+    mapPair k b = (k, b)
+
+-- | Insert a field into a payload, tagging the native value through its
+-- `ToAnyValue` instance.
+insertField : ToAnyValue v => Text -> v -> Values -> Values
+insertField key v = TM.insert key (toAny v)
+
+-- | Read a field from a payload at its expected type. Returns `None` when the
+-- field is absent or holds a different type.
+lookupField : FromAnyValue v => Text -> Values -> Optional v
+lookupField key row = fromAny =<< TM.lookup key row

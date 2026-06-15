@@ -1,0 +1,11 @@
+sdk-version: 3.4.11
+name: canton-data-standard-utils-v1
+source: daml
+version: 0.1.0
+dependencies:
+  - daml-prim
+  - daml-stdlib
+build-options:
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches
+  - --target=2.1

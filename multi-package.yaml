@@ -1,0 +1,9 @@
+# Build order for the standard's packages. Interface packages live under
+# interfaces/ (one package per interface version); examples and tests build
+# against their compiled DARs.
+packages:
+- ./interfaces/canton-data-standard-utils-v1
+- ./interfaces/canton-data-standard-datapoint-v1
+- ./examples/datapoint-producer
+- ./examples/datapoint-consumer
+- ./tests
