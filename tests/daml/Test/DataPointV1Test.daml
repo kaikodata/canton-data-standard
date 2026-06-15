@@ -1,0 +1,105 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the `PublishedData` interface: reading the view, the metadata
+-- extensibility channel, and the disclosure-gated `PublishedData_Fetch` choice.
+module Test.DataPointV1Test where
+
+import DA.Assert ((===))
+import DA.Optional (isSome)
+import qualified DA.TextMap as TM
+import Daml.Script
+
+import DataStandard.DataPointV1
+import DataStandard.Utils
+import Test.Fixtures
+
+testSubscriberReadsViewThroughInterface : Script ()
+testSubscriberReadsViewThroughInterface = do
+  oracle     <- allocateParty "Oracle"
+  subscriber <- allocateParty "Subscriber"
+  now        <- getTime
+  feedCid <- submit oracle $ createCmd TestFeed with
+    oracle, subscriber, feedId = "eurc-usd", rate = 1.0432, at = now
+    meta = emptyMetadata
+  Some v <- queryInterfaceContractId subscriber
+    (toInterfaceContractId @PublishedData feedCid)
+  v.distributor   === oracle
+  v.publishedAt   === now
+  v.schemaVersion === "1.0.0"
+  TM.lookup "feedId" v.values === Some (AVText "eurc-usd")
+  TM.lookup "rate"   v.values === Some (AVDecimal 1.0432)
+
+testMetadataKeysAreReadableAndIgnorable : Script ()
+testMetadataKeysAreReadableAndIgnorable = do
+  oracle     <- allocateParty "Oracle"
+  subscriber <- allocateParty "Subscriber"
+  now        <- getTime
+  feedCid <- submit oracle $ createCmd TestFeed with
+    oracle, subscriber, feedId = "eurc-usd", rate = 1.0432, at = now
+    meta = Metadata with values = TM.fromList [("exampleoracle.com/source", "reference-implementation")]
+  Some v <- queryInterfaceContractId subscriber
+    (toInterfaceContractId @PublishedData feedCid)
+  TM.lookup "exampleoracle.com/source"  v.metadata.values === Some "reference-implementation"
+  TM.lookup "exampleoracle.com/unknown" v.metadata.values === None
+
+testMetadataDefaultsEmpty : Script ()
+testMetadataDefaultsEmpty = do
+  oracle     <- allocateParty "Oracle"
+  subscriber <- allocateParty "Subscriber"
+  now        <- getTime
+  feedCid <- submit oracle $ createCmd TestFeed with
+    oracle, subscriber, feedId = "eurc-usd", rate = 1.0432, at = now
+    meta = emptyMetadata
+  Some v <- queryInterfaceContractId subscriber
+    (toInterfaceContractId @PublishedData feedCid)
+  v.metadata === emptyMetadata
+
+testNonStakeholderReadsViaDisclosedFetch : Script ()
+testNonStakeholderReadsViaDisclosedFetch = do
+  oracle <- allocateParty "Oracle"
+  subscriber <- allocateParty "Subscriber"
+  reader <- allocateParty "Reader"
+  now    <- getTime
+  feedCid <- submit oracle $ createCmd TestFeed with
+    oracle, subscriber, feedId = "eurc-usd", rate = 1.0432, at = now
+    meta = emptyMetadata
+  Some disc <- queryDisclosure oracle feedCid
+  v <- submit (actAs reader <> disclose disc) $
+    exerciseCmd (toInterfaceContractId @PublishedData feedCid)
+      PublishedData_Fetch with actor = reader
+  v.distributor === oracle
+  TM.lookup "rate" v.values === Some (AVDecimal 1.0432)
+  active <- queryContractId oracle feedCid
+  assertMsg "published contract must survive a fetch" (isSome active)
+
+testFetchWithoutDisclosureFails : Script ()
+testFetchWithoutDisclosureFails = do
+  oracle <- allocateParty "Oracle"
+  subscriber <- allocateParty "Subscriber"
+  reader <- allocateParty "Reader"
+  now    <- getTime
+  feedCid <- submit oracle $ createCmd TestFeed with
+    oracle, subscriber, feedId = "eurc-usd", rate = 1.0432, at = now
+    meta = emptyMetadata
+  submitFailsWithNoDisclosure reader
+    (exerciseCmd (toInterfaceContractId @PublishedData feedCid)
+       PublishedData_Fetch with actor = reader)
+    "NotVisible"
+
+-- The fetch self-authorizes only the named actor: a submitter cannot read on
+-- behalf of a party it cannot act as.
+testFetchAsAnotherActorFails : Script ()
+testFetchAsAnotherActorFails = do
+  oracle <- allocateParty "Oracle"
+  subscriber <- allocateParty "Subscriber"
+  reader <- allocateParty "Reader"
+  now    <- getTime
+  feedCid <- submit oracle $ createCmd TestFeed with
+    oracle, subscriber, feedId = "eurc-usd", rate = 1.0432, at = now
+    meta = emptyMetadata
+  Some disc <- queryDisclosure oracle feedCid
+  submitFailsWith reader disc
+    (exerciseCmd (toInterfaceContractId @PublishedData feedCid)
+       PublishedData_Fetch with actor = subscriber)
+    "authoriz"

@@ -1,0 +1,17 @@
+sdk-version: 3.4.11
+name: canton-data-standard-tests
+source: daml
+version: 0.1.0
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+data-dependencies:
+  - ../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.0.dar
+  - ../interfaces/canton-data-standard-datapoint-v1/.daml/dist/canton-data-standard-datapoint-v1-0.1.0.dar
+  - ../examples/datapoint-producer/.daml/dist/datapoint-producer-example-0.1.0.dar
+  - ../examples/datapoint-consumer/.daml/dist/datapoint-consumer-example-0.1.0.dar
+build-options:
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches
+  - --target=2.1

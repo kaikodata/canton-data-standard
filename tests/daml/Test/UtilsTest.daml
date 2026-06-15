@@ -1,0 +1,65 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the typed `Values` accessors in `DataStandard.Utils`.
+module Test.UtilsTest where
+
+import DA.Assert ((===))
+import DA.TextMap (TextMap)
+import qualified DA.TextMap as TM
+import Daml.Script
+
+import DataStandard.Utils
+
+testTypedFieldRoundTrips : Script ()
+testTypedFieldRoundTrips = do
+  now <- getTime
+  let vs = insertField "i"  (42 : Int)
+         $ insertField "d"  (1.0432 : Decimal)
+         $ insertField "t"  ("eurc-usd" : Text)
+         $ insertField "ts" now
+         $ insertField "b"  True
+           TM.empty
+  lookupField "i"  vs === Some (42 : Int)
+  lookupField "d"  vs === Some (1.0432 : Decimal)
+  lookupField "t"  vs === Some ("eurc-usd" : Text)
+  lookupField "ts" vs === Some now
+  lookupField "b"  vs === Some True
+
+testMissingFieldIsNone : Script ()
+testMissingFieldIsNone = do
+  let vs = insertField "present" (1 : Int) TM.empty
+  (lookupField "absent" vs : Optional Int) === None
+
+testWrongTypeIsNone : Script ()
+testWrongTypeIsNone = do
+  let vs = insertField "rate" (1.0432 : Decimal) TM.empty
+  (lookupField "rate" vs : Optional Text) === None
+
+testListRoundTrips : Script ()
+testListRoundTrips = do
+  let vs = insertField "xs" ([1, 2, 3] : [Int]) TM.empty
+  (lookupField "xs" vs : Optional [Int]) === Some [1, 2, 3]
+
+testMapRoundTrips : Script ()
+testMapRoundTrips = do
+  let weights = TM.fromList [("eurc", 0.6), ("usdc", 0.4)] : TextMap Decimal
+  let vs = insertField "weights" weights TM.empty
+  (lookupField "weights" vs : Optional (TextMap Decimal)) === Some weights
+
+testNestedConstituentsRoundTrip : Script ()
+testNestedConstituentsRoundTrip = do
+  let mkConstituent symbol weight =
+        insertField "symbol" (symbol : Text)
+          $ insertField "weight" (weight : Decimal) TM.empty
+      constituents =
+        [ mkConstituent "eurc-usd" 0.6
+        , mkConstituent "usdc-usd" 0.4
+        ] : [TextMap AnyValue]
+  let vs = insertField "constituents" constituents TM.empty
+  (lookupField "constituents" vs : Optional [TextMap AnyValue]) === Some constituents
+
+testListReadAsScalarIsNone : Script ()
+testListReadAsScalarIsNone = do
+  let vs = insertField "xs" ([1, 2, 3] : [Int]) TM.empty
+  (lookupField "xs" vs : Optional Int) === None

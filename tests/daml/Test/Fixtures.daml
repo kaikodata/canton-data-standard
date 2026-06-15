@@ -1,0 +1,60 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Shared fixtures and assertion helpers for the test suite.
+module Test.Fixtures where
+
+import qualified DA.Text as T
+import qualified DA.TextMap as TM
+import Daml.Script
+
+import DataStandard.DataPointV1
+import DataStandard.Utils
+
+-- | A minimal `PublishedData` implementation, just enough to exercise the
+-- interface. The full example templates live in `examples/`.
+template TestFeed
+  with
+    oracle     : Party
+    subscriber : Party
+    feedId     : Text
+    rate       : Decimal
+    at         : Time
+    meta       : Metadata
+  where
+    signatory oracle
+    observer subscriber
+
+    interface instance PublishedData for TestFeed where
+      view = PublishedDataView with
+        distributor   = oracle
+        publishedAt   = at
+        schemaVersion = "1.0.0"
+        values        = TM.fromList
+          [ ("feedId", AVText feedId)
+          , ("rate",   AVDecimal rate)
+          ]
+        metadata      = meta
+
+-- | Expect the submission to abort with a message containing `needle`.
+-- Asserting the specific message proves the scenario fails for the intended
+-- reason, not an incidental visibility or authorization error.
+submitFailsWith : Party -> Disclosure -> Commands a -> Text -> Script ()
+submitFailsWith p d cmds = expectAbort (trySubmit (actAs p <> disclose d) cmds)
+
+-- | As `submitFailsWith`, but for submissions that attach no disclosed
+-- contract.
+submitFailsWithNoDisclosure : Party -> Commands a -> Text -> Script ()
+submitFailsWithNoDisclosure p cmds = expectAbort (trySubmit p cmds)
+
+-- | Run a submission, fail the test unless it aborted, and require the abort
+-- message to contain `needle`.
+expectAbort : Script (Either SubmitError a) -> Text -> Script ()
+expectAbort run needle = do
+  r <- run
+  case r of
+    Right _ -> abort ("expected failure containing: " <> needle)
+    Left e ->
+      let shown = show e
+      in assertMsg ("wanted error containing '" <> needle <> "', got: " <> shown)
+           (needle `T.isInfixOf` shown)
