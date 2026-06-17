@@ -1,0 +1,60 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The price quote interface of the Data Standard. A producer implements
+-- `PublishedQuote` on its own template to publish a single typed price for a
+-- named feed; a consumer reads it through the interface without depending on
+-- the producer's package.
+module DataStandard.QuoteV1 where
+
+import DataStandard.Utils (Metadata, Quote)
+
+-- | The on-ledger view every `PublishedQuote` implementation exposes. A
+-- consumer reads only these fields, and is therefore decoupled from the
+-- template that produced them. The view is the envelope around a `Quote`: it
+-- adds the provenance the quote itself omits (who published it, and when).
+data PublishedQuoteView = PublishedQuoteView with
+    distributor : Party
+      -- ^ The party that published the quote, and whom the consumer chooses to
+      -- trust as its source. A consumer trusts a (distributor, feedId) pair,
+      -- where the feed lives inside `quote`; switching provider is re-pointing
+      -- it, with no recompile.
+    quote : Quote
+      -- ^ The economic content of the publication: the feed, its price, and the
+      -- market instant the price is observed for. Carries no provenance of its
+      -- own; that is the envelope's job.
+    publishedAt : Time
+      -- ^ When the provider produced the quote. Distinct from `quote.priceTime`
+      -- (a quote can be produced after the instant it prices) and from the
+      -- contract-creation time. Use it for staleness checks. Carries the same
+      -- meaning as `PublishedData.publishedAt`, so a provider implementing both
+      -- interfaces sets the two identically.
+    metadata : Metadata
+      -- ^ Additive annotations not part of the quote itself; see `Metadata`.
+      -- `emptyMetadata` when the provider has nothing to attach.
+  deriving (Eq, Show)
+
+-- | The price quote interface. A provider implements it on its own template;
+-- consumers read the view through it and never import the provider's package,
+-- so switching providers is a configuration change rather than a recompile.
+--
+-- `PublishedQuote` is independent and does not require
+-- `DataStandard.DataPointV1`. A provider that wants its publications to be
+-- readable both as a typed quote and as a generic data point MAY implement both
+-- interfaces on the same template, setting the shared fields (`distributor`,
+-- `publishedAt`) identically across the two views.
+interface PublishedQuote where
+  viewtype PublishedQuoteView
+
+  -- | Read the view from a contract the caller can see. This is the read path
+  -- for a party that is not a stakeholder of the contract: such a party
+  -- obtains the contract through explicit disclosure, which grants visibility
+  -- but not the authority to `fetch`, and so reads by exercising this choice,
+  -- which is authorised by the caller alone. It is nonconsuming and returns
+  -- the view, never the implementing template.
+  nonconsuming choice PublishedQuote_Fetch : PublishedQuoteView
+    with
+      actor : Party
+        -- ^ The party reading the quote, and the sole controller of the choice.
+    controller actor
+    do pure (view this)

@@ -9,8 +9,11 @@ dependencies:
 data-dependencies:
   - ../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.0.dar
   - ../interfaces/canton-data-standard-datapoint-v1/.daml/dist/canton-data-standard-datapoint-v1-0.1.0.dar
+  - ../interfaces/canton-data-standard-quote-v1/.daml/dist/canton-data-standard-quote-v1-0.1.0.dar
   - ../examples/datapoint-producer/.daml/dist/datapoint-producer-example-0.1.0.dar
   - ../examples/datapoint-consumer/.daml/dist/datapoint-consumer-example-0.1.0.dar
+  - ../examples/quote-producer/.daml/dist/quote-producer-example-0.1.0.dar
+  - ../examples/quote-consumer/.daml/dist/quote-consumer-example-0.1.0.dar
 build-options:
   - --ghc-option=-Wunused-binds
   - --ghc-option=-Wunused-matches

@@ -1,0 +1,62 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | A reference producer for the Data Standard's `PublishedQuote` interface. It
+-- shows the whole of a provider's obligation: implement `PublishedQuote` on a
+-- template the provider signs. A consumer of the standard reads the result
+-- without depending on this package.
+module QuoteProducer.PriceOracle where
+
+import qualified DA.TextMap as TM
+
+import DataStandard.QuoteV1
+import DataStandard.Utils
+
+-- | A published price quote for a single feed.
+--
+-- The template deliberately has no observers: a reader that is not a
+-- stakeholder obtains the contract through explicit disclosure and reads it by
+-- exercising `PublishedQuote_Fetch`, which keeps the cost of publishing
+-- independent of the size of the audience.
+template PriceQuote
+  with
+    oracle      : Party
+      -- ^ The provider; signs and owns the publication.
+    feedId      : Text
+      -- ^ The feed this quote is for, for example "BTC/USD".
+    price       : Decimal
+    priceTime   : Time
+      -- ^ The market time the price is observed for.
+    publishedAt : Time
+      -- ^ When the quote was produced.
+  where
+    signatory oracle
+
+    interface instance PublishedQuote for PriceQuote where
+      view = PublishedQuoteView with
+        distributor = oracle
+        quote = Quote with
+          feedId
+          price
+          priceTime
+        publishedAt
+        metadata    = Metadata with
+          values = TM.fromList [("exampleoracle.com/source", "reference-implementation")]
+
+    -- | Publish a fresh quote by archiving this contract and creating its
+    -- replacement. Because the old publication is archived, a consumer holding
+    -- its contract id fails fast rather than reading a stale quote; revoking a
+    -- feed is the same operation with no replacement created.
+    choice UpdateQuote : ContractId PriceQuote
+      with
+        newPrice       : Decimal
+        newPriceTime   : Time
+        newPublishedAt : Time
+          -- ^ Must be later than the current `publishedAt`.
+      controller oracle
+      do
+        assertMsg "publication time must increase" (newPublishedAt > publishedAt)
+        create this with
+          price       = newPrice
+          priceTime   = newPriceTime
+          publishedAt = newPublishedAt

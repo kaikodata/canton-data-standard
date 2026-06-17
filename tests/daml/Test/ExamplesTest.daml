@@ -12,7 +12,10 @@ import Daml.Script
 
 import DataConsumer.Trading
 import DataProducer.PriceOracle
+import QuoteConsumer.Trading
+import QuoteProducer.PriceOracle
 import DataStandard.DataPointV1 (PublishedData)
+import DataStandard.QuoteV1 (PublishedQuote)
 import DataStandard.Utils (emptyMetadata)
 import Test.Fixtures
 
@@ -108,4 +111,89 @@ testAcceptFailsAfterPriceRefresh = do
   _ <- submit oracle $ exerciseCmd priceCid UpdatePrice with
     newPrice = 66000.0, newAt = addRelTime now (minutes 1)
   submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade)
+    "Could not find contract"
+
+testConsumerTradesOffProducersQuote : Script ()
+testConsumerTradesOffProducersQuote = do
+  oracle <- allocateParty "ExampleOracle"
+  seller <- allocateParty "Seller"
+  buyer  <- allocateParty "Buyer"
+  now    <- getTime
+  let observedAt = addRelTime now (minutes (-1))
+  quoteCid <- submit oracle $ createCmd PriceQuote with
+    oracle, feedId = "BTC/USD", price = 65000.0, priceTime = observedAt, publishedAt = now
+  offerCid <- submit seller $ createCmd QuoteTradeOffer with
+    seller, buyer, feedId = "BTC/USD", quantity = 0.5
+    quoteCid = toInterfaceContractId @PublishedQuote quoteCid
+  Some disc <- queryDisclosure oracle quoteCid
+  settlementCid <- submit (actAs buyer <> disclose disc) $
+    exerciseCmd offerCid AcceptQuoteTrade
+  Some s <- queryContractId buyer settlementCid
+  s.price       === 65000.0
+  s.totalAmount === 32500.0
+  s.distributor === oracle
+  s.priceTime   === observedAt
+  s.publishedAt === now
+
+testQuoteConsumerRejectsWrongFeed : Script ()
+testQuoteConsumerRejectsWrongFeed = do
+  oracle <- allocateParty "ExampleOracle"
+  seller <- allocateParty "Seller"
+  buyer  <- allocateParty "Buyer"
+  now    <- getTime
+  quoteCid <- submit oracle $ createCmd PriceQuote with
+    oracle, feedId = "ETH/USD", price = 3200.0, priceTime = now, publishedAt = now
+  offerCid <- submit seller $ createCmd QuoteTradeOffer with
+    seller, buyer, feedId = "BTC/USD", quantity = 0.5
+    quoteCid = toInterfaceContractId @PublishedQuote quoteCid
+  Some disc <- queryDisclosure oracle quoteCid
+  submitFailsWith buyer disc (exerciseCmd offerCid AcceptQuoteTrade) "feed mismatch"
+
+testQuoteUpdateRequiresIncreasingTime : Script ()
+testQuoteUpdateRequiresIncreasingTime = do
+  oracle <- allocateParty "ExampleOracle"
+  now    <- getTime
+  quoteCid <- submit oracle $ createCmd PriceQuote with
+    oracle, feedId = "BTC/USD", price = 65000.0, priceTime = now, publishedAt = now
+  submitFailsWithNoDisclosure oracle
+    (exerciseCmd quoteCid UpdateQuote with
+       newPrice = 66000.0, newPriceTime = now, newPublishedAt = now)
+    "publication time must increase"
+
+testProducerUpdatesQuote : Script ()
+testProducerUpdatesQuote = do
+  oracle <- allocateParty "ExampleOracle"
+  now    <- getTime
+  quoteCid <- submit oracle $ createCmd PriceQuote with
+    oracle, feedId = "BTC/USD", price = 65000.0, priceTime = now, publishedAt = now
+  let published = addRelTime now (minutes 2)
+      observed  = addRelTime now (minutes 1)
+  newCid <- submit oracle $ exerciseCmd quoteCid UpdateQuote with
+    newPrice = 66000.0, newPriceTime = observed, newPublishedAt = published
+  old <- queryContractId oracle quoteCid
+  assertMsg "stale publication must be archived" (isNone old)
+  Some v <- queryInterfaceContractId oracle
+    (toInterfaceContractId @PublishedQuote newCid)
+  v.quote.price     === 66000.0
+  v.quote.priceTime === observed
+  v.publishedAt     === published
+
+-- An offer snapshots a specific contract id, so a producer refresh archives
+-- it and the late accept fails outright instead of trading on stale data.
+testQuoteAcceptFailsAfterRefresh : Script ()
+testQuoteAcceptFailsAfterRefresh = do
+  oracle <- allocateParty "ExampleOracle"
+  seller <- allocateParty "Seller"
+  buyer  <- allocateParty "Buyer"
+  now    <- getTime
+  quoteCid <- submit oracle $ createCmd PriceQuote with
+    oracle, feedId = "BTC/USD", price = 65000.0, priceTime = now, publishedAt = now
+  offerCid <- submit seller $ createCmd QuoteTradeOffer with
+    seller, buyer, feedId = "BTC/USD", quantity = 0.5
+    quoteCid = toInterfaceContractId @PublishedQuote quoteCid
+  Some disc <- queryDisclosure oracle quoteCid
+  let later = addRelTime now (minutes 1)
+  _ <- submit oracle $ exerciseCmd quoteCid UpdateQuote with
+    newPrice = 66000.0, newPriceTime = later, newPublishedAt = later
+  submitFailsWith buyer disc (exerciseCmd offerCid AcceptQuoteTrade)
     "Could not find contract"

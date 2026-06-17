@@ -1,0 +1,114 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the `PublishedQuote` interface: reading the typed view, the
+-- metadata extensibility channel, and the disclosure-gated
+-- `PublishedQuote_Fetch` choice.
+module Test.QuoteV1Test where
+
+import DA.Assert ((===))
+import DA.Optional (isSome)
+import DA.Time (addRelTime, minutes)
+import qualified DA.TextMap as TM
+import Daml.Script
+
+import DataStandard.QuoteV1
+import DataStandard.Utils
+import Test.Fixtures
+
+testSubscriberReadsViewThroughInterface : Script ()
+testSubscriberReadsViewThroughInterface = do
+  oracle     <- allocateParty "Oracle"
+  subscriber <- allocateParty "Subscriber"
+  now        <- getTime
+  let observedAt = addRelTime now (minutes (-1))
+  quoteCid <- submit oracle $ createCmd TestQuote with
+    oracle, subscriber, feedId = "BTC/USD", price = 65000.0
+    priceTime = observedAt, publishedAt = now
+    meta = emptyMetadata
+  Some v <- queryInterfaceContractId subscriber
+    (toInterfaceContractId @PublishedQuote quoteCid)
+  v.distributor    === oracle
+  v.quote.feedId   === "BTC/USD"
+  v.quote.price    === 65000.0
+  v.quote.priceTime === observedAt
+  v.publishedAt    === now
+
+testMetadataKeysAreReadableAndIgnorable : Script ()
+testMetadataKeysAreReadableAndIgnorable = do
+  oracle     <- allocateParty "Oracle"
+  subscriber <- allocateParty "Subscriber"
+  now        <- getTime
+  quoteCid <- submit oracle $ createCmd TestQuote with
+    oracle, subscriber, feedId = "BTC/USD", price = 65000.0
+    priceTime = now, publishedAt = now
+    meta = Metadata with values = TM.fromList [("exampleoracle.com/source", "reference-implementation")]
+  Some v <- queryInterfaceContractId subscriber
+    (toInterfaceContractId @PublishedQuote quoteCid)
+  TM.lookup "exampleoracle.com/source"  v.metadata.values === Some "reference-implementation"
+  TM.lookup "exampleoracle.com/unknown" v.metadata.values === None
+
+testMetadataDefaultsEmpty : Script ()
+testMetadataDefaultsEmpty = do
+  oracle     <- allocateParty "Oracle"
+  subscriber <- allocateParty "Subscriber"
+  now        <- getTime
+  quoteCid <- submit oracle $ createCmd TestQuote with
+    oracle, subscriber, feedId = "BTC/USD", price = 65000.0
+    priceTime = now, publishedAt = now
+    meta = emptyMetadata
+  Some v <- queryInterfaceContractId subscriber
+    (toInterfaceContractId @PublishedQuote quoteCid)
+  v.metadata === emptyMetadata
+
+testNonStakeholderReadsViaDisclosedFetch : Script ()
+testNonStakeholderReadsViaDisclosedFetch = do
+  oracle <- allocateParty "Oracle"
+  subscriber <- allocateParty "Subscriber"
+  reader <- allocateParty "Reader"
+  now    <- getTime
+  quoteCid <- submit oracle $ createCmd TestQuote with
+    oracle, subscriber, feedId = "BTC/USD", price = 65000.0
+    priceTime = now, publishedAt = now
+    meta = emptyMetadata
+  Some disc <- queryDisclosure oracle quoteCid
+  v <- submit (actAs reader <> disclose disc) $
+    exerciseCmd (toInterfaceContractId @PublishedQuote quoteCid)
+      PublishedQuote_Fetch with actor = reader
+  v.distributor === oracle
+  v.quote.price === 65000.0
+  active <- queryContractId oracle quoteCid
+  assertMsg "published contract must survive a fetch" (isSome active)
+
+testFetchWithoutDisclosureFails : Script ()
+testFetchWithoutDisclosureFails = do
+  oracle <- allocateParty "Oracle"
+  subscriber <- allocateParty "Subscriber"
+  reader <- allocateParty "Reader"
+  now    <- getTime
+  quoteCid <- submit oracle $ createCmd TestQuote with
+    oracle, subscriber, feedId = "BTC/USD", price = 65000.0
+    priceTime = now, publishedAt = now
+    meta = emptyMetadata
+  submitFailsWithNoDisclosure reader
+    (exerciseCmd (toInterfaceContractId @PublishedQuote quoteCid)
+       PublishedQuote_Fetch with actor = reader)
+    "NotVisible"
+
+-- The fetch self-authorizes only the named actor: a submitter cannot read on
+-- behalf of a party it cannot act as.
+testFetchAsAnotherActorFails : Script ()
+testFetchAsAnotherActorFails = do
+  oracle <- allocateParty "Oracle"
+  subscriber <- allocateParty "Subscriber"
+  reader <- allocateParty "Reader"
+  now    <- getTime
+  quoteCid <- submit oracle $ createCmd TestQuote with
+    oracle, subscriber, feedId = "BTC/USD", price = 65000.0
+    priceTime = now, publishedAt = now
+    meta = emptyMetadata
+  Some disc <- queryDisclosure oracle quoteCid
+  submitFailsWith reader disc
+    (exerciseCmd (toInterfaceContractId @PublishedQuote quoteCid)
+       PublishedQuote_Fetch with actor = subscriber)
+    "authoriz"
