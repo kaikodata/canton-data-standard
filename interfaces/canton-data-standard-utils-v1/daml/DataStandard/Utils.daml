@@ -89,6 +89,25 @@ instance FromAnyValue a => FromAnyValue (TextMap a) where
   fromAny (AVMap m) = traverseTextMap fromAny m
   fromAny _         = None
 
+-- | A single price for a named feed, observed at a market instant. This is the
+-- economic content of a quote and nothing more: provenance (who published it,
+-- and when) is an envelope concern carried by the view that wraps a `Quote`,
+-- not part of the quote itself, so the same `Quote` value can be reused across
+-- views without dragging distribution metadata along with it.
+data Quote = Quote with
+    feedId : Text
+      -- ^ The price feed this quote is for, for example "BTC/USD". A consumer
+      -- trusts a (distributor, feedId) pair; switching provider is re-pointing
+      -- it, with no recompile.
+    price : Decimal
+      -- ^ The quoted price for the feed, as an exact base-10 fixed-point number.
+    priceTime : Time
+      -- ^ The economic "as of" instant: the market time the price is observed
+      -- for. This is the timestamp a consumer reasons about the price with. Set
+      -- it equal to the view's `publishedAt` for a feed with no distinct
+      -- observation time.
+  deriving (Eq, Show)
+
 -- | Extensibility metadata carried by every Data Standard view.
 --
 -- Metadata is the channel for additive evolution: a producer attaches new

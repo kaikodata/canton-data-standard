@@ -13,8 +13,8 @@ distributor, a publication time, a schema version, and a key/value payload. It
 does not fix the keys inside that payload. A consumer and the providers it
 reads agree on those out of band, and `schemaVersion` identifies the agreement;
 switching to another provider of the same schema is a configuration change:
-which distributor party to trust. Typed interfaces built on `PublishedData`,
-such as a price quote, carry named fields in the view itself and drop the
+which distributor party to trust. Typed interfaces such as the
+`PublishedQuote` interface carry named fields in the view itself and drop the
 schema agreement for the feeds they cover. The interfaces are versioned, so the
 shape a consumer builds against stays fixed for the life of a version.
 
@@ -22,10 +22,13 @@ shape a consumer builds against stays fixed for the life of a version.
 
 | Path | Package | What it is |
 |---|---|---|
-| `interfaces/canton-data-standard-utils-v1` | `canton-data-standard-utils-v1` | The shared value model: `AnyValue`/`Values`, `Metadata`, typed accessors. Kept separate because it can evolve through smart-contract upgrades, which interface-defining packages cannot. |
+| `interfaces/canton-data-standard-utils-v1` | `canton-data-standard-utils-v1` | The shared value model: `AnyValue`/`Values`, the `Quote` record, `Metadata`, and typed accessors. Kept separate because it can evolve through smart-contract upgrades, which interface-defining packages cannot. |
 | `interfaces/canton-data-standard-datapoint-v1` | `canton-data-standard-datapoint-v1` | The generic `PublishedData` interface: a key/value payload (`Values`), publication time, schema version, and extensibility metadata. |
 | `examples/datapoint-producer` | `datapoint-producer-example` | A reference producer: a price-publication template implementing `PublishedData`. |
 | `examples/datapoint-consumer` | `datapoint-consumer-example` | A reference consumer: a trade workflow that reads any `PublishedData` implementation. Depends only on the interface packages. |
+| `interfaces/canton-data-standard-quote-v1` | `canton-data-standard-quote-v1` | The typed `PublishedQuote` interface: a `Quote` (feed, price, and observation time) plus a publication time and extensibility metadata. Independent of `PublishedData`. |
+| `examples/quote-producer` | `quote-producer-example` | A reference producer: a quote-publication template implementing `PublishedQuote`. |
+| `examples/quote-consumer` | `quote-consumer-example` | A reference consumer: a trade workflow that reads any `PublishedQuote` implementation. Depends only on the interface packages. |
 | `tests` | `canton-data-standard-tests` | Daml Script tests for everything above. |
 
 ## Build and test
@@ -61,9 +64,11 @@ The standard versions three things independently:
    (`...-datapoint-v1`, `DataStandard.DataPointV1`). A breaking change to an
    interface is a new `-v2` package. That is the one ecosystem-wide migration
    point; `v1` stays available and nothing changes under existing consumers.
-2. The payload schema version is a field on every view (`schemaVersion`,
-   semantic versioning). It describes the `values` content of a given feed
-   and evolves per producer, independently of the interface.
+2. The payload schema version is a field on the generic data point view
+   (`schemaVersion`, semantic versioning). It describes the `values` content of
+   a given feed and evolves per producer, independently of the interface. A
+   typed interface such as the quote has no separate payload schema; its
+   interface version is its schema.
 3. Metadata on every view handles additive evolution. New annotations are
    added as metadata entries under DNS-prefixed keys rather than as
    view-shape changes, so existing readers keep working.

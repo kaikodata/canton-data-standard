@@ -25,9 +25,9 @@ schema: the generic interface does not fix the keys inside `values`. You read
 the keys you agreed on with the provider, `assetPair` and `price` below, and
 `schemaVersion` identifies that agreement. Switching to another provider that
 publishes the same schema is then a decision about which `distributor` party
-you trust. A typed interface built on `PublishedData`, such as a price quote,
-carries named fields in the view itself and drops the schema agreement for the
-feeds it covers.
+you trust. A typed interface such as `PublishedQuote` carries named fields in
+the view itself, which drops the schema agreement for the feeds it covers (see
+below).
 
 ## Reading inside your workflow
 
@@ -91,6 +91,33 @@ contract. Everything else is your workflow's policy.
 Unknown `values` fields and unknown `metadata` keys are normal; producers add
 them over time. Ignore what you do not understand. That is what keeps old
 consumers working.
+
+## Reading a typed quote
+
+When a feed publishes through the `PublishedQuote` interface, the price and feed
+id are typed fields on the view, so the payload-schema step disappears. Depend
+on the quote interface DAR, reference publications as `ContractId PublishedQuote`,
+and read through the `PublishedQuote_Fetch` choice:
+
+```daml
+import DataStandard.QuoteV1
+
+choice AcceptQuoteTrade : ContractId QuoteTradeSettlement
+  controller buyer
+  do
+    v <- exercise quoteCid PublishedQuote_Fetch with actor = buyer
+    assertMsg "feed mismatch" (v.quote.feedId == feedId)
+    ...  -- settle at v.quote.price
+```
+
+The full version lives in
+[`examples/quote-consumer`](../examples/quote-consumer).
+
+`quote.price` is a typed `Decimal` you read directly, with no `lookupField` and
+no `schemaVersion` to gate on. The checks that remain yours are the same as for
+a data point: confirm `quote.feedId` is the feed you expect, and bound the age
+of `publishedAt` for your staleness policy. The standard authenticates the
+`distributor`, not the feed identity.
 
 ## Reading at scale
 

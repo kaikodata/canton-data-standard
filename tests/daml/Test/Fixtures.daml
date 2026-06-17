@@ -9,6 +9,7 @@ import qualified DA.TextMap as TM
 import Daml.Script
 
 import DataStandard.DataPointV1
+import DataStandard.QuoteV1
 import DataStandard.Utils
 
 -- | A minimal `PublishedData` implementation, just enough to exercise the
@@ -35,6 +36,31 @@ template TestFeed
           , ("rate",   AVDecimal rate)
           ]
         metadata      = meta
+
+-- | A minimal `PublishedQuote` implementation, just enough to exercise the
+-- interface. The full example templates live in `examples/`.
+template TestQuote
+  with
+    oracle     : Party
+    subscriber : Party
+    feedId     : Text
+    price      : Decimal
+    priceTime  : Time
+    publishedAt : Time
+    meta       : Metadata
+  where
+    signatory oracle
+    observer subscriber
+
+    interface instance PublishedQuote for TestQuote where
+      view = PublishedQuoteView with
+        distributor = oracle
+        quote = Quote with
+          feedId
+          price
+          priceTime
+        publishedAt
+        metadata = meta
 
 -- | Expect the submission to abort with a message containing `needle`.
 -- Asserting the specific message proves the scenario fails for the intended
