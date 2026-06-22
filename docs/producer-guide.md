@@ -176,6 +176,140 @@ archive-and-replace to publish a fresh quote (see `UpdateQuote` in
 disclosure plus the `PublishedQuote_Fetch` choice to reach consumers who are not
 stakeholders.
 
+## Distributing a signed quote: the verifier interfaces
+
+Everything above pushes data onto the ledger: you create a contract per
+publication and refresh it by archive-and-replace. The verifier interfaces are
+the other delivery model. You sign the quote off-ledger with an ECDSA key, hand
+the signed bytes to consumers through your own channel (your API, a feed), and
+publish just one on-ledger contract that holds your public key. A consumer
+pulls a signed quote whenever it needs one and authenticates it against that
+contract. You write nothing per quote, and the verifier contract is reused for
+every quote you ever sign, on every feed.
+
+There are two verifier interfaces. `QuoteVerifier` authenticates a signed quote
+and returns it. `PaidQuoteVerifier` does the same and settles a per-call fee in
+the same transaction. You implement them the same way as any other interface,
+with an `interface instance` on a template you sign as a party.
+
+```daml
+import DataStandard.QuoteVerifierV1
+
+template SignatureVerifier
+  with
+    oracle    : Party
+    publicKey : Text
+  where
+    signatory oracle
+
+    interface instance QuoteVerifier for SignatureVerifier where
+      view = QuoteVerifierView with
+        oracle
+        publicKey
+        hashMethod   = "SHA-256"
+        signMethod   = "secp256k1"
+        payloadCodec = quoteCodecId
+```
+
+The full version, including a key-rotation choice, lives in
+[`examples/verifier-producer`](../examples/verifier-producer). The paid sibling
+is a separate, token-coupled package,
+[`examples/paid-verifier-producer`](../examples/paid-verifier-producer).
+
+The view, field by field:
+
+| Field | Meaning |
+|---|---|
+| `oracle` | You, the party that signs the quotes and the verifier contract. Becomes the `distributor` of every quote the verifier authenticates, so a consumer trusts an `(oracle, feedId)` pair exactly as it trusts a `(distributor, feedId)` pair on the push side. |
+| `publicKey` | Your secp256k1 public key, hex-encoded in DER form. The signature check reads it from the contract, never from the quote, so a consumer cannot substitute a key of its own. Rotating the key means archiving this contract and publishing a replacement. |
+| `hashMethod` | The digest the signature commits to, the constant `"SHA-256"`. Advertised for off-ledger tooling; the on-ledger check is fixed by the interface. |
+| `signMethod` | The signature scheme, the constant `"secp256k1"`. Advertised the same way. |
+| `payloadCodec` | The identifier of the canonical encoding you signed over: `quoteCodecId` (`"v1-quote-concat"`) for the free verifier, `paidQuoteCodecId` (`"v1-paid-quote-concat"`) for the paid one. A consumer reads it to select the matching off-ledger encoder. |
+
+### Signing a quote
+
+The signature is an ECDSA signature over the SHA-256 of a canonical text. The
+canonical text is the one thing your off-ledger signer and the on-ledger check
+have to agree on byte for byte. The encoding is fixed and defined in the
+interface package as `canonicalQuoteText`: the fields `publishedAt`, `expiresAt`,
+`quote.feedId`, `quote.price`, and `quote.priceTime`, in that order, each
+followed by a `"|"` delimiter, with times rendered as integer milliseconds since
+the Unix epoch and the price via the standard `Decimal` rendering. The arity is
+fixed and `quote.feedId` is the only free-text field, so the encoding is injective
+and reproducible off-ledger as long as your feed ids carry no `"|"`. A feed id is a
+short symbol such as `"BTC/USD"`, so this is a constraint your signer enforces, not
+a practical limit; the on-ledger check does not reject a feed id that breaks it.
+
+`quote.price` and the paid `cost.fee` are `Decimal`, which is `Numeric 10`. Daml's
+`show` renders them at the full scale of ten fractional digits with trailing zeros,
+so `65000.0` becomes `65000.0000000000` and `0.5` becomes `0.5000000000`. Your
+signer must produce that exact form, rounded to ten decimal places, not a minimized
+one. Pin it with a shared test vector between your signer and this encoding.
+
+Your signer reproduces that exact text, hashes it with SHA-256, and signs the
+digest with secp256k1, producing a hex-encoded DER signature. On-ledger, the
+`secp256k1` builtin SHA-256s its message argument internally, so the check
+passes the hex of the canonical text and verifies against your public key.
+Producing the off-ledger signer is outside this repository; what the repository
+fixes is the encoding and the on-ledger check, so any signer that follows the
+same encoding interoperates.
+
+Each signed quote carries an `expiresAt` alongside the quote. That window is the
+only replay defence: a captured `(payload, signature)` pair stops verifying once
+it lapses, so sign quotes with a validity window matched to how long the price
+should stand. There is no on-ledger record of which quotes you have signed, so
+expiry is what bounds a leaked signature.
+
+### Charging per call: the paid verifier
+
+`PaidQuoteVerifier` adds a fee to the same flow. You sign the quote together with
+a `Cost` (a `fee` amount and the `InstrumentId` it is denominated in), so the
+price of the call is covered by your signature and a client cannot be made to
+pay more, or in a different asset, than you quoted. The paid encoding,
+`paidCanonicalText`, reuses the free quote prefix verbatim and appends the cost,
+so it is a distinct codec with its own identifier. It carries the same delimiter
+constraint as the free encoding, on `quote.feedId` and now also the instrument
+`id`: neither may contain `"|"`.
+
+The paid verifier template carries one extra field, the `payee` that the fee is
+credited to:
+
+```daml
+import DataStandard.PaidQuoteVerifierV1
+
+template PaidSignatureVerifier
+  with
+    oracle    : Party
+    payee     : Party
+    publicKey : Text
+  where
+    signatory oracle
+
+    interface instance PaidQuoteVerifier for PaidSignatureVerifier where
+      view = PaidQuoteVerifierView with
+        oracle
+        payee
+        publicKey
+        hashMethod   = "SHA-256"
+        signMethod   = "secp256k1"
+        payloadCodec = paidQuoteCodecId
+```
+
+The fee is settled by a single direct Canton Token Standard transfer that the
+calling consumer authorizes alone: the consumer is the sender, and the receiver
+is the `payee` pinned on your verifier, never a party named in the quote. The
+payee can be a treasury distinct from the signing oracle. For the transfer to
+settle in one step the payee needs standing consent to receive, typically a
+transfer preapproval registered with the instrument's registry; the consumer
+threads that consent through the registry-supplied context. If the transfer does
+not complete in one step, the whole verification aborts, so a consumer never
+gets an authenticated quote it has not paid for.
+
+The paid verifier depends on the Canton Token Standard interface DARs in
+[`dependencies/`](../dependencies). Reference them from your `daml.yaml` the same
+way you reference the standard's DARs. The reference paid producer that puts this
+together is [`examples/paid-verifier-producer`](../examples/paid-verifier-producer).
+
 ## Publication lifecycle
 
 Refresh is archive-and-replace: a consuming choice that creates the

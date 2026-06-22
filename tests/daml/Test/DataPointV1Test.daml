@@ -82,10 +82,10 @@ testFetchWithoutDisclosureFails = do
   feedCid <- submit oracle $ createCmd TestFeed with
     oracle, subscriber, feedId = "eurc-usd", rate = 1.0432, at = now
     meta = emptyMetadata
-  submitFailsWithNoDisclosure reader
+  submitFailsMatchingNoDisclosure reader
     (exerciseCmd (toInterfaceContractId @PublishedData feedCid)
        PublishedData_Fetch with actor = reader)
-    "NotVisible"
+    isContractNotFound "the reader cannot see an undisclosed publication"
 
 -- The fetch self-authorizes only the named actor: a submitter cannot read on
 -- behalf of a party it cannot act as.
@@ -99,7 +99,7 @@ testFetchAsAnotherActorFails = do
     oracle, subscriber, feedId = "eurc-usd", rate = 1.0432, at = now
     meta = emptyMetadata
   Some disc <- queryDisclosure oracle feedCid
-  submitFailsWith reader disc
+  submitFailsMatching reader disc
     (exerciseCmd (toInterfaceContractId @PublishedData feedCid)
        PublishedData_Fetch with actor = subscriber)
-    "authoriz"
+    isAuthorizationFailure "the reader cannot fetch as another actor"

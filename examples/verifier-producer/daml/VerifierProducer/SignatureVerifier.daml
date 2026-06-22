@@ -1,0 +1,49 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | A reference producer for the Data Standard's free verifier interface. It
+-- shows the whole of a signing producer's on-ledger obligation: hold the public
+-- key on a template the producer signs, and implement a verifier interface so
+-- consumers can authenticate the producer's off-ledger-signed quotes. The
+-- producer's signing happens off-ledger; the only on-ledger artifacts are these
+-- long-lived, disclosed verifier contracts. `SignatureVerifier` implements the
+-- free `QuoteVerifier`; the pay-as-you-go sibling lives in the
+-- `paid-verifier-producer` example.
+module VerifierProducer.SignatureVerifier where
+
+import DataStandard.QuoteVerifierV1
+
+-- | A producer's signature-verifier contract. It is published once and
+-- disclosed to clients; because it holds only the public key and writes nothing
+-- when exercised, a single contract authenticates every quote the producer
+-- signs, for every feed, with no contention. The method-string fields are fixed
+-- by the standard and set to their canonical constants on creation.
+template SignatureVerifier
+  with
+    oracle : Party
+      -- ^ The producer; signs and owns the verifier, and is the distributor of
+      -- every quote it authenticates.
+    publicKey : Text
+      -- ^ The producer's hex DER secp256k1 public key. Rotating it is archiving
+      -- this contract and publishing a replacement with the new key.
+  where
+    signatory oracle
+
+    interface instance QuoteVerifier for SignatureVerifier where
+      view = QuoteVerifierView with
+        oracle
+        publicKey
+        hashMethod   = "SHA-256"
+        signMethod   = "secp256k1"
+        payloadCodec = quoteCodecId
+
+    -- | Rotate the producer's signing key by archiving this verifier and
+    -- creating its replacement. Quotes signed under the old key stop verifying
+    -- the moment the old contract is archived, since a client can no longer
+    -- disclose it; quotes signed under the new key verify on the replacement.
+    choice RotateKey : ContractId SignatureVerifier
+      with
+        newPublicKey : Text
+          -- ^ The producer's new hex DER secp256k1 public key.
+      controller oracle
+      do create this with publicKey = newPublicKey

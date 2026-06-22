@@ -90,10 +90,10 @@ testFetchWithoutDisclosureFails = do
     oracle, subscriber, feedId = "BTC/USD", price = 65000.0
     priceTime = now, publishedAt = now
     meta = emptyMetadata
-  submitFailsWithNoDisclosure reader
+  submitFailsMatchingNoDisclosure reader
     (exerciseCmd (toInterfaceContractId @PublishedQuote quoteCid)
        PublishedQuote_Fetch with actor = reader)
-    "NotVisible"
+    isContractNotFound "the reader cannot see an undisclosed publication"
 
 -- The fetch self-authorizes only the named actor: a submitter cannot read on
 -- behalf of a party it cannot act as.
@@ -108,7 +108,7 @@ testFetchAsAnotherActorFails = do
     priceTime = now, publishedAt = now
     meta = emptyMetadata
   Some disc <- queryDisclosure oracle quoteCid
-  submitFailsWith reader disc
+  submitFailsMatching reader disc
     (exerciseCmd (toInterfaceContractId @PublishedQuote quoteCid)
        PublishedQuote_Fetch with actor = subscriber)
-    "authoriz"
+    isAuthorizationFailure "the reader cannot fetch as another actor"

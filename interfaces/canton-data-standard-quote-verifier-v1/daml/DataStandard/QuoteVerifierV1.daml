@@ -1,0 +1,194 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The signature-verifier half of the price quote standard. Where
+-- `DataStandard.QuoteV1` distributes a quote by publishing an on-ledger
+-- contract the producer signs as a Daml party, this interface distributes a
+-- quote the producer signed off-ledger with an ECDSA key: a client materializes
+-- the signed record, hands it to `QuoteVerifier_Verify`, and receives a
+-- `VerifiedPayload` that
+-- a consumer reads exactly as it reads a pushed `PublishedQuoteView`.
+--
+-- The verifier is a single long-lived contract holding the producer's public
+-- key. It is feed-agnostic: it authenticates the signer, not the feed, so one
+-- verifier serves every feed the producer signs. The choice writes nothing to
+-- the ledger, so the same contract verifies any number of payloads concurrently
+-- without contention.
+module DataStandard.QuoteVerifierV1 where
+
+import DataStandard.Utils (Quote)
+
+import DA.Crypto.Text (secp256k1, sha256, toHex)
+import DA.Date (Month(Jan), date)
+import DA.Time (convertRelTimeToMicroseconds, subTime, time)
+
+-- | The on-ledger view every `QuoteVerifier` implementation exposes. It names
+-- the producer and pins the public key the producer's signatures are checked
+-- against, so the key a payload is verified with is fixed by the contract a
+-- consumer chose to trust, never supplied alongside the payload.
+data QuoteVerifierView = QuoteVerifierView with
+    oracle : Party
+      -- ^ The producer that signed the payloads this verifier accepts, and the
+      -- party that signs and distributes the verifier contract itself. Becomes
+      -- the `distributor` of every `VerifiedPayload`, so a consumer trusts a
+      -- (oracle, feedId) pair just as the push side trusts (distributor, feedId).
+    publicKey : Text
+      -- ^ The producer's secp256k1 public key, hex-encoded in DER form, against
+      -- which `QuoteVerifier_Verify` checks every signature. Resident on the contract rather
+      -- than passed per call, so a caller cannot substitute a key of its own;
+      -- rotating the key is replacing the verifier contract.
+    hashMethod : Text
+      -- ^ The digest algorithm the signature commits to, the constant "SHA-256".
+      -- Advertised for off-ledger re-verification tooling; the on-ledger check
+      -- is fixed by this interface and does not read this field.
+    signMethod : Text
+      -- ^ The signature scheme, the constant "secp256k1". Advertised for the
+      -- same off-ledger tooling; the on-ledger check is fixed by this interface.
+    payloadCodec : Text
+      -- ^ The identifier of the canonical encoding the signature was produced
+      -- over, the constant "v1-quote-concat". A consumer or auditor uses it to
+      -- select the matching off-ledger encoder when reproducing the signed text.
+  deriving (Eq, Show)
+
+-- | The record a client reconstructs and hands to `QuoteVerifier_Verify`. It is the exact set
+-- of fields the producer signed off-ledger: the quote plus the validity window
+-- the signature commits to. The signature itself travels beside it as a `QuoteVerifier_Verify`
+-- argument rather than inside it, because the signature is over the encoding of
+-- these fields and cannot also cover itself.
+data SignedPayload = SignedPayload with
+    publishedAt : Time
+      -- ^ When the producer produced and signed the quote. Becomes the
+      -- `publishedAt` of the `VerifiedPayload`; carries the same meaning as
+      -- `PublishedQuoteView.publishedAt`. A consumer uses it for staleness checks.
+    expiresAt : Time
+      -- ^ The instant after which the payload is no longer accepted. `QuoteVerifier_Verify`
+      -- rejects a payload presented strictly after this time; the boundary
+      -- instant itself is still accepted. This is the sole replay defence:
+      -- a captured (payload, signature) pair stops verifying once it lapses.
+    quote : Quote
+      -- ^ The economic content: the feed, its price, and the market instant the
+      -- price is observed for. Identical in meaning to `PublishedQuoteView.quote`.
+  deriving (Eq, Show)
+
+-- | The in-memory result `QuoteVerifier_Verify` returns on success. It carries no contract id
+-- because `QuoteVerifier_Verify` writes nothing to the ledger; a consumer uses it directly in
+-- the same transaction. The leading three fields are positionally and
+-- semantically aligned with `PublishedQuoteView` (`distributor`, `publishedAt`,
+-- `quote`), so consumer code reading a verified quote is identical to code
+-- reading a pushed one. The trailing three are the evidence triple, retained so
+-- the verification can be reproduced off-ledger.
+data VerifiedPayload = VerifiedPayload with
+    distributor : Party
+      -- ^ The producer whose key validated the signature, taken from the
+      -- verifier's `oracle`. Never taken from the payload, so a payload cannot
+      -- claim a distributor it was not signed by.
+    publishedAt : Time
+      -- ^ Copied from the verified payload: when the producer produced the quote.
+    quote : Quote
+      -- ^ Copied from the verified payload: the authenticated economic content.
+    canonicalHash : Text
+      -- ^ The SHA-256 digest of the canonical encoding, hex-encoded. This is the
+      -- digest the signature commits to; retained as evidence for off-ledger
+      -- re-verification.
+    signature : Text
+      -- ^ The verified signature, hex-encoded DER ECDSA. Retained as evidence.
+    publicKey : Text
+      -- ^ The public key the signature verified against, copied from the
+      -- verifier. Retained as evidence so re-verification needs nothing else.
+  deriving (Eq, Show)
+
+-- | The identifier of the canonical encoding `QuoteVerifier_Verify` reproduces and checks the
+-- signature over. A producer's off-ledger signer must encode with the matching
+-- algorithm; a consumer reads it from the view to select that encoder.
+quoteCodecId : Text
+quoteCodecId = "v1-quote-concat"
+
+-- | The Unix epoch, the origin the canonical encoding renders times relative to.
+epoch : Time
+epoch = time (date 1970 Jan 1) 0 0 0
+
+-- | A time as integer milliseconds since the Unix epoch. The canonical encoding
+-- renders every time this way so the on-ledger and off-ledger encoders agree on
+-- a single representation independent of how times are displayed.
+timeToMillis : Time -> Int
+timeToMillis t = convertRelTimeToMicroseconds (subTime t epoch) / 1000
+
+-- | The canonical text of a payload under the "v1-quote-concat" encoding: the
+-- fields concatenated in the fixed order `publishedAt`, `expiresAt`,
+-- `quote.feedId`, `quote.price`, `quote.priceTime`, each followed by a "|"
+-- delimiter, with times as epoch-millisecond integers, and the price via Daml's
+-- `show` for `Decimal` (a `Numeric 10`), which renders at the full scale of ten
+-- fractional digits with trailing zeros; a signer must reproduce that exact form,
+-- not a minimized one. The arity is fixed and `quote.feedId` is the only
+-- free-text field, so the encoding is injective and reproducible byte for byte as
+-- long as `quote.feedId` carries no "|" (a feed id is a short symbol such as
+-- "BTC/USD"); a producer's off-ledger signer must honour that, since a feed id
+-- containing the delimiter would shift the field boundaries and is not rejected
+-- on-ledger here. The signature is computed over this text; `QuoteVerifier_Verify` rebuilds it and
+-- checks the signature against it.
+canonicalQuoteText : SignedPayload -> Text
+canonicalQuoteText p =
+     show (timeToMillis p.publishedAt) <> "|"
+  <> show (timeToMillis p.expiresAt)  <> "|"
+  <> p.quote.feedId                   <> "|"
+  <> show p.quote.price               <> "|"
+  <> show (timeToMillis p.quote.priceTime) <> "|"
+
+-- | The digest the producer's signature commits to: the SHA-256 of the
+-- hex-encoded canonical text, itself hex-encoded. Used only as the
+-- `canonicalHash` evidence on a `VerifiedPayload`; the signature check itself
+-- lets the secp256k1 builtin hash the message internally.
+quoteCanonicalHash : SignedPayload -> Text
+quoteCanonicalHash p = sha256 (toHex (canonicalQuoteText p))
+
+-- | Whether `signature` is a valid producer signature over `payload`'s canonical
+-- text under `publicKey`. The secp256k1 builtin SHA-256s the message argument
+-- internally, so the message passed is the hex-encoded canonical text, matching
+-- a signature produced over the SHA-256 of that same hex text.
+quoteSignatureValid : Text -> SignedPayload -> Text -> Bool
+quoteSignatureValid publicKey payload signature =
+  secp256k1 signature (toHex (canonicalQuoteText payload)) publicKey
+
+-- | The signature-verifier interface. A producer implements it on a template it
+-- signs as a Daml party (the disclosed verifier contract); a consumer obtains
+-- that contract through explicit disclosure and reads authenticated quotes
+-- through `QuoteVerifier_Verify`, depending only on this package and never on
+-- the producer's.
+-- A breaking change to the verification policy or the encoding is a new `-v2`
+-- package, since interface definitions cannot be smart-contract-upgraded.
+interface QuoteVerifier where
+  viewtype QuoteVerifierView
+
+  -- | Authenticate an off-ledger-signed quote and return it as a
+  -- `VerifiedPayload`, without writing anything to the ledger. The choice is
+  -- pure: it neither creates nor archives a contract, so the verifier is
+  -- reusable and contention-free, and the result is consumed in the caller's own
+  -- transaction. It checks, in order, that the payload has not expired (the sole
+  -- replay defence) and that the signature is valid under the verifier's
+  -- resident public key, aborting at the first failure with a deterministic
+  -- message. Confirming the quote is for an expected feed is the consumer's
+  -- responsibility: the standard authenticates the signer, not the feed.
+  nonconsuming choice QuoteVerifier_Verify : VerifiedPayload
+    with
+      actor : Party
+        -- ^ The party verifying the quote, and the sole controller of the
+        -- choice. Self-authorizes the read: a submitter cannot verify on behalf
+        -- of a party it cannot act as.
+      payload : SignedPayload
+        -- ^ The reconstructed record the producer signed off-ledger.
+      signature : Text
+        -- ^ The producer's signature over `payload`'s canonical encoding,
+        -- hex-encoded DER ECDSA.
+    controller actor
+    do
+      now <- getTime
+      assertMsg "payload expired" (now <= payload.expiresAt)
+      let v = view this
+      assertMsg "invalid signature" (quoteSignatureValid v.publicKey payload signature)
+      pure VerifiedPayload with
+        distributor   = v.oracle
+        publishedAt   = payload.publishedAt
+        quote         = payload.quote
+        canonicalHash = quoteCanonicalHash payload
+        signature     = signature
+        publicKey     = v.publicKey

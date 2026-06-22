@@ -1,0 +1,257 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | A test-only registry implementing the genuine Canton Token Standard V1
+-- interfaces. It exists to settle a real transfer under a Daml Script, standing
+-- in for the registry/wallet app that issues holdings and runs the transfer
+-- factory in production. The interfaces, views, choices, and types are the
+-- genuine splice packages; only these concrete templates (which a registry would
+-- normally provide) are local.
+--
+-- The settlement model proven here is direct, one-step, and sender-authorized:
+-- a holding is the registry's obligation to its owner, so the registry admin
+-- alone signs it and the owner is an observer. Because the receiver does not
+-- sign its holding, the factory can credit the receiver inside a transfer the
+-- sender authorizes alone, using only the authority available in the choice body
+-- (the sender plus the factory's signatory admin). Receive-side consent is not
+-- an authority requirement here; it is a policy the registry enforces by reading
+-- a standing `TransferPreapproval` the receiver maintains. `TransferPreapproval`
+-- is not part of the Token Standard DARs (it is a wallet/Amulet-layer concept),
+-- so the registry models it locally as the receiver-signed contract the factory
+-- honours.
+--
+-- WARNING: this registry is a deliberately minimal TEST STUB, not a model
+-- production registry. It enforces no value conservation (a transfer credits the
+-- receiver the full amount regardless of the inputs spent, and returns no change),
+-- its `TransferInstruction` accept path neither spends the inputs nor re-checks the
+-- preapproval, and the factory does not enforce `transfer.executeBefore`. These
+-- shortcuts keep the harness small enough to prove the verifier's settlement
+-- authorization under a Daml Script; a real registry must conserve value, gate
+-- every settlement path on consent, and honour the transfer deadline. Do not copy
+-- this registry into production.
+module TestTokenRegistry.Registry where
+
+import qualified DA.Foldable as F
+import qualified DA.TextMap as TM
+
+import Splice.Api.Token.HoldingV1
+import Splice.Api.Token.MetadataV1
+import Splice.Api.Token.TransferInstructionV1
+
+-- | A registry-issued holding of an instrument by an owner.
+--
+-- The holding is the registry's obligation to the owner, so the instrument
+-- admin is the sole signatory and the owner is an observer. This asymmetry is
+-- deliberate: it is what lets the factory credit a receiver's holding inside a
+-- sender-authorized transfer without the receiver co-authorizing, while the
+-- owner still sees and can use the contract.
+template RegistryHolding
+  with
+    admin : Party
+      -- ^ The instrument admin; the registry party that issues and signs the holding.
+    owner : Party
+      -- ^ The party the holding belongs to; an observer, never a signatory.
+    instrumentId : InstrumentId
+      -- ^ The instrument the holding is denominated in. Its `admin` MUST equal `admin`.
+    amount : Decimal
+      -- ^ The size of the holding. MUST be strictly positive.
+  where
+    signatory admin
+    observer owner
+    ensure amount > 0.0 && instrumentId.admin == admin
+
+    interface instance Holding for RegistryHolding where
+      view = HoldingView with
+        owner
+        instrumentId
+        amount
+        lock = None
+        meta = emptyMetadata
+
+-- | A standing, reusable consent by a receiver to accept incoming transfers of a
+-- given instrument. Modelled here because the Token Standard DARs do not define
+-- preapprovals; a production registry sources equivalent consent from its wallet
+-- layer.
+--
+-- The receiver signs it, so the consent is genuine and unforgeable; the admin
+-- observes it so the transfer factory can read it inside the settling
+-- transaction. It is non-consuming consent: settling a transfer does not archive
+-- it, so it covers an unbounded stream of incoming transfers until the receiver
+-- revokes it.
+template TransferPreapproval
+  with
+    admin : Party
+      -- ^ The instrument admin/registry honouring the preapproval; an observer so
+      -- the factory can read it during settlement.
+    receiver : Party
+      -- ^ The party consenting to receive transfers; the sole signatory.
+    instrumentId : InstrumentId
+      -- ^ The instrument the consent covers. Its `admin` MUST equal `admin`.
+  where
+    signatory receiver
+    observer admin
+    ensure instrumentId.admin == admin
+
+    -- | Revoke the standing consent. Controlled by the receiver alone, since the
+    -- consent is theirs to withdraw.
+    choice RevokePreapproval : ()
+      controller receiver
+      do pure ()
+
+-- | A transfer instruction representing a transfer that is pending the
+-- receiver's acceptance, for the path where no standing preapproval exists.
+--
+-- The happy path proven by the spike never creates one of these: with a
+-- preapproval in place the factory settles directly to `Completed`. It is
+-- defined so the registry genuinely implements the full `TransferInstruction`
+-- interface, including the receiver-controlled accept and the sender-controlled
+-- withdraw.
+template RegistryTransferInstruction
+  with
+    transfer : Transfer
+      -- ^ The transfer this instruction would settle on acceptance.
+  where
+    signatory transfer.sender, transfer.instrumentId.admin
+    observer transfer.receiver
+
+    interface instance TransferInstruction for RegistryTransferInstruction where
+      view = TransferInstructionView with
+        originalInstructionCid = None
+        transfer
+        status = TransferPendingReceiverAcceptance
+        meta = emptyMetadata
+
+      transferInstruction_acceptImpl self _arg = do
+        -- Acceptance carries the receiver's authority (the choice controller),
+        -- which is exactly what is needed to credit a receiver-signed model. The
+        -- registry-issued holding here is admin-signed, so the admin authority on
+        -- the instruction suffices to credit the receiver.
+        receiverHoldingCid <- create RegistryHolding with
+          admin = transfer.instrumentId.admin
+          owner = transfer.receiver
+          instrumentId = transfer.instrumentId
+          amount = transfer.amount
+        archive self
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with
+            receiverHoldingCids = [toInterfaceContractId @Holding receiverHoldingCid]
+          senderChangeCids = []
+          meta = emptyMetadata
+
+      transferInstruction_rejectImpl self _arg = do
+        archive self
+        pure failedResult
+
+      transferInstruction_withdrawImpl self _arg = do
+        archive self
+        pure failedResult
+
+      transferInstruction_updateImpl _self _arg =
+        pure failedResult
+
+-- | The transfer factory that settles transfers for one instrument admin.
+--
+-- The admin is the sole signatory, so a transfer the sender authorizes alone
+-- runs in a choice body holding the union of the sender's and the admin's
+-- authority. That union is enough to archive the sender's admin-signed input
+-- holdings and to credit the receiver's admin-signed holding, which is why
+-- settlement completes in a single step without the receiver authorizing it.
+template RegistryTransferFactory
+  with
+    admin : Party
+      -- ^ The instrument admin issuing the factory and signing settled holdings.
+  where
+    signatory admin
+
+    interface instance TransferFactory for RegistryTransferFactory where
+      view = TransferFactoryView with
+        admin
+        meta = emptyMetadata
+
+      transferFactory_transferImpl _self arg = do
+        let transfer = arg.transfer
+        assertMsg "expected admin must match the factory admin"
+          (arg.expectedAdmin == admin)
+        assertMsg "transfer instrument must be administered by this factory"
+          (transfer.instrumentId.admin == admin)
+        assertMsg "transfer amount must be positive" (transfer.amount > 0.0)
+
+        -- Receive-side consent: the registry backend supplies the receiver's
+        -- standing preapproval contract through the standard choice context. The
+        -- factory reads it (the admin observes the preapproval) and requires it to
+        -- match the receiver and instrument. This supplies consent as policy, not
+        -- as a Daml authority requirement, so the sender remains the only
+        -- authorizing submitter.
+        preapprovalCid <- preapprovalCidFromContext arg.extraArgs.context
+        preapproval <- fetch preapprovalCid
+        assertMsg "preapproval must be for the transfer receiver"
+          (preapproval.receiver == transfer.receiver)
+        assertMsg "preapproval must be for the transfer instrument"
+          (preapproval.instrumentId == transfer.instrumentId)
+        assertMsg "preapproval must be honoured by this factory admin"
+          (preapproval.admin == admin)
+
+        -- Spend the sender's input holdings. Requiring them to be supplied lets a
+        -- sender use deliberate contention on holdings to prevent duplicate
+        -- transfers, as the standard intends.
+        assertMsg "transfer must specify input holdings to spend"
+          (not (null transfer.inputHoldingCids))
+        spendInputs admin transfer
+
+        -- Credit the receiver with a single new holding. Admin-signed, so the
+        -- authority already in this choice body covers the create.
+        receiverHoldingCid <- create RegistryHolding with
+          admin
+          owner = transfer.receiver
+          instrumentId = transfer.instrumentId
+          amount = transfer.amount
+
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with
+            receiverHoldingCids = [toInterfaceContractId @Holding receiverHoldingCid]
+          senderChangeCids = []
+          meta = emptyMetadata
+
+      transferFactory_publicFetchImpl _self arg = do
+        assertMsg "expected admin must match the factory admin"
+          (arg.expectedAdmin == admin)
+        pure TransferFactoryView with admin, meta = emptyMetadata
+
+-- | A `Failed` transfer-instruction result with no change and empty metadata.
+failedResult : TransferInstructionResult
+failedResult = TransferInstructionResult with
+  output = TransferInstructionResult_Failed
+  senderChangeCids = []
+  meta = emptyMetadata
+
+-- | The well-known choice-context key under which the registry backend supplies
+-- the receiver's standing preapproval contract.
+preapprovalContextKey : Text
+preapprovalContextKey = "challengerdeep.com/transfer-preapproval-cid"
+
+-- | Extract the preapproval contract id the registry backend placed in the
+-- standard choice context, failing if it is absent or of the wrong shape. The
+-- standard `AnyContractId` is coerced to the concrete `TransferPreapproval`
+-- type; `fetch` then enforces that the contract is genuinely of that template.
+preapprovalCidFromContext : ChoiceContext -> Update (ContractId TransferPreapproval)
+preapprovalCidFromContext context =
+  case TM.lookup preapprovalContextKey context.values of
+    Some (AV_ContractId anyCid) -> pure (coerceContractId anyCid)
+    Some _ -> fail "preapproval choice-context value must be a contract id"
+    None -> fail "receiver has no standing preapproval for this instrument"
+
+-- | Archive every input holding named by the transfer, asserting each one is
+-- the sender's and is denominated in the transfer's instrument. The holdings are
+-- admin-signed, so the admin authority in the factory body authorizes the
+-- archive.
+spendInputs : Party -> Transfer -> Update ()
+spendInputs admin transfer = F.forA_ transfer.inputHoldingCids $ \holdingCid -> do
+  let registryCid = fromInterfaceContractId @RegistryHolding holdingCid
+  holding <- fetch registryCid
+  assertMsg "input holding must belong to the sender"
+    (holding.owner == transfer.sender)
+  assertMsg "input holding must match the transfer instrument"
+    (holding.instrumentId == transfer.instrumentId)
+  assertMsg "input holding must be administered by this factory"
+    (holding.admin == admin)
+  archive registryCid

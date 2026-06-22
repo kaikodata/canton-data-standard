@@ -84,3 +84,41 @@ expectAbort run needle = do
       let shown = show e
       in assertMsg ("wanted error containing '" <> needle <> "', got: " <> shown)
            (needle `T.isInfixOf` shown)
+
+-- | Expect the submission to fail with a `SubmitError` that satisfies
+-- `matches`, rather than with a particular error-message substring. Platform
+-- error text can vary across ledger versions, so the negative tests in this
+-- live-capable suite discriminate on the structured error constructor; the
+-- standard's own `assertMsg` messages are matched by text elsewhere, since
+-- those are fixed by this repository.
+submitFailsMatching : Party -> Disclosure -> Commands a -> (SubmitError -> Bool) -> Text -> Script ()
+submitFailsMatching p d cmds = expectFailure (trySubmit (actAs p <> disclose d) cmds)
+
+-- | As `submitFailsMatching`, but for submissions that attach no disclosed
+-- contract.
+submitFailsMatchingNoDisclosure : Party -> Commands a -> (SubmitError -> Bool) -> Text -> Script ()
+submitFailsMatchingNoDisclosure p cmds = expectFailure (trySubmit p cmds)
+
+-- | Run a submission, fail the test unless it aborted, and require the
+-- resulting `SubmitError` to satisfy `matches`. `expected` names the failure
+-- for the diagnostic shown when a different error surfaces instead.
+expectFailure : Script (Either SubmitError a) -> (SubmitError -> Bool) -> Text -> Script ()
+expectFailure run matches expected = do
+  r <- run
+  case r of
+    Right _ -> abort ("expected failure: " <> expected)
+    Left e -> assertMsg ("expected " <> expected <> ", got: " <> show e) (matches e)
+
+-- | The submission lacked the authority a choice required, for example acting
+-- as a party that is not the choice's controller.
+isAuthorizationFailure : SubmitError -> Bool
+isAuthorizationFailure AuthorizationError{} = True
+isAuthorizationFailure _ = False
+
+-- | A referenced contract id did not resolve to a contract the submitter can
+-- use: either it was never visible to that party (no stakeholder relationship
+-- and no disclosure) or an archive-and-replace refresh superseded it before the
+-- party read it. The ledger reports both as a not-found contract.
+isContractNotFound : SubmitError -> Bool
+isContractNotFound ContractNotFound{} = True
+isContractNotFound _ = False

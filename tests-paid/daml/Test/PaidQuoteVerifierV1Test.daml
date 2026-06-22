@@ -1,0 +1,306 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the `PaidQuoteVerifier` interface against real secp256k1 keys and
+-- the genuine Canton Token Standard V1 settlement path. Each script generates a
+-- keypair with `secp256k1generatekeypair`, signs the canonical text of a paid
+-- payload (which includes the cost) with `secp256k1sign`, and exercises
+-- `PaidQuoteVerifier_VerifyAndPay` against a verifier created with the matching public key and a
+-- pinned payee. The fee settles to a treasury distinct from the signing oracle
+-- through the test token registry, with the treasury supplying a standing
+-- preapproval. Negative cases assert the specific abort message so each failure
+-- is shown to be for its intended reason.
+module Test.PaidQuoteVerifierV1Test where
+
+import DA.Assert ((===))
+import DA.Crypto.Text (toHex)
+import DA.Time (addRelTime, hours, minutes)
+import qualified DA.TextMap as TM
+import Daml.Script
+
+import DataStandard.PaidQuoteVerifierV1
+import DataStandard.Utils (Quote(..))
+
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId(..))
+import Splice.Api.Token.MetadataV1
+import Splice.Api.Token.TransferInstructionV1 (TransferFactory)
+import TestTokenRegistry.Registry
+import PaidVerifierProducer.SignatureVerifier
+import PaidVerifierConsumer.Trading
+import Test.Fixtures (submitFailsWith, expectAbort)
+
+-- | A staged paid verifier: a real keypair, the on-ledger paid verifier holding
+-- the public key and pinning a treasury payee, a funded buyer/payer, the
+-- treasury's standing preapproval, the registry's transfer factory, and every
+-- disclosure the buyer needs to reach the oracle-signed verifier, the
+-- admin-signed factory, and the treasury-signed preapproval in one submission.
+data PaidFixture = PaidFixture with
+    oracle : Party
+    treasury : Party
+    buyer : Party
+    admin : Party
+    keyPair : Secp256k1KeyPair
+    instrumentId : InstrumentId
+    verifierTpl : ContractId PaidSignatureVerifier
+    verifierIf : ContractId PaidQuoteVerifier
+    verifierDisc : Disclosure
+    buyerHoldingCid : ContractId RegistryHolding
+    factoryCid : ContractId TransferFactory
+    factoryDisc : Disclosure
+    preapprovalCid : ContractId TransferPreapproval
+    preapprovalDisc : Disclosure
+
+-- | The fee every default payload quotes, in USD issued by the registry admin.
+defaultFee : Decimal
+defaultFee = 5.0
+
+-- | Stage the fixture: allocate parties, generate a keypair, publish the paid
+-- verifier with the treasury as payee, fund the buyer with a holding, stand up
+-- the factory, and have the treasury publish a preapproval — capturing the
+-- disclosures the buyer submits with.
+setup : Script PaidFixture
+setup = do
+  oracle <- allocateParty "Oracle"
+  treasury <- allocateParty "Treasury"
+  buyer <- allocateParty "Buyer"
+  admin <- allocateParty "RegistryAdmin"
+  keyPair <- secp256k1generatekeypair
+  let instrumentId = InstrumentId with admin, id = "USD"
+
+  verifierTpl <- submit oracle $ createCmd PaidSignatureVerifier with
+    oracle, payee = treasury, publicKey = keyPair.publicKey
+  Some verifierDisc <- queryDisclosure oracle verifierTpl
+
+  buyerHoldingCid <- submit admin $ createCmd RegistryHolding with
+    admin, owner = buyer, instrumentId, amount = 100.0
+
+  factoryTplCid <- submit admin $ createCmd RegistryTransferFactory with admin
+  let factoryCid = toInterfaceContractId @TransferFactory factoryTplCid
+  Some factoryDisc <- queryDisclosure admin factoryTplCid
+
+  preapprovalCid <- submit treasury $ createCmd TransferPreapproval with
+    admin, receiver = treasury, instrumentId
+  Some preapprovalDisc <- queryDisclosure treasury preapprovalCid
+
+  pure PaidFixture with
+    oracle, treasury, buyer, admin, keyPair, instrumentId
+    verifierTpl
+    verifierIf = toInterfaceContractId @PaidQuoteVerifier verifierTpl
+    verifierDisc, buyerHoldingCid, factoryCid, factoryDisc
+    preapprovalCid, preapprovalDisc
+
+-- | A standard, valid paid payload: BTC/USD @ 65000, a 5 USD fee on the
+-- fixture's instrument, published now, expiring in 1h.
+defaultPayload : PaidFixture -> Time -> PaidSignedPayload
+defaultPayload f now = PaidSignedPayload with
+  publishedAt = now
+  expiresAt   = addRelTime now (hours 1)
+  cost = Cost with
+    fee = defaultFee
+    instrument = f.instrumentId
+  quote = Quote with
+    feedId    = "BTC/USD"
+    price     = 65000.0
+    priceTime = addRelTime now (minutes (-1))
+
+-- | Sign a paid payload's canonical text with a private key, producing the same
+-- signature the producer would off-ledger. `secp256k1sign` SHA-256s the
+-- hex-encoded message internally, matching the on-ledger `secp256k1` check.
+signPaid : Text -> PaidSignedPayload -> Script Text
+signPaid privateKey payload =
+  secp256k1sign privateKey (toHex (paidCanonicalText payload))
+
+-- | The payment args carrying the buyer's holding and the treasury's preapproval
+-- in the standard choice context under the registry's well-known key.
+paymentArgs : PaidFixture -> PaymentArgs
+paymentArgs f = PaymentArgs with
+  transferFactoryCid = f.factoryCid
+  inputHoldingCids = [toInterfaceContractId @Holding f.buyerHoldingCid]
+  context = ExtraArgs with
+    context = ChoiceContext with
+      values = TM.fromList
+        [ (preapprovalContextKey, AV_ContractId (coerceContractId f.preapprovalCid)) ]
+    meta = emptyMetadata
+
+-- A valid signature verifies, returns the quote, and settles the fee to the
+-- pinned treasury in one step: the buyer's input holding is gone and the
+-- treasury holds exactly one new holding for the fee.
+testVerifyAndPayHappyPath : Script ()
+testVerifyAndPayHappyPath = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+  verified <- submit
+    ( actAs f.buyer
+        <> disclose f.verifierDisc
+        <> disclose f.factoryDisc
+        <> disclose f.preapprovalDisc
+    ) $
+    exerciseCmd f.verifierIf PaidQuoteVerifier_VerifyAndPay with
+      actor = f.buyer, payload, signature = sig, payment = paymentArgs f
+
+  verified.distributor     === f.oracle
+  verified.quote.feedId    === "BTC/USD"
+  verified.quote.price     === 65000.0
+  verified.publishedAt     === payload.publishedAt
+  verified.canonicalHash   === paidCanonicalHash payload
+  verified.signature       === sig
+  verified.publicKey        === f.keyPair.publicKey
+
+  -- The fee settled to the treasury, not the oracle.
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  credited <- case treasuryHoldings of
+    [(_, h)] -> pure h
+    _ -> abort ("expected exactly one treasury holding, got: " <> show (length treasuryHoldings))
+  credited.owner === f.treasury
+  credited.amount === defaultFee
+  credited.instrumentId === f.instrumentId
+
+  -- The buyer's input holding was spent.
+  buyerHolding <- queryContractId f.admin f.buyerHoldingCid
+  assertMsg "buyer input holding is archived" (buyerHolding == None)
+
+  -- The oracle, distinct from the payee, was credited nothing.
+  oracleHoldings <- query @RegistryHolding f.oracle
+  assertMsg "oracle (not the payee) receives no fee" (null oracleHoldings)
+
+-- A correctly-signed payload past its expiry is rejected before any payment is
+-- attempted: expiry is the sole replay defence.
+testExpiredRejected : Script ()
+testExpiredRejected = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload f now            -- expires now + 1h
+  sig <- signPaid f.keyPair.privateKey payload
+  passTime (hours 2)                            -- move strictly past expiresAt
+  submitFailsWithDiscs f
+    ( exerciseCmd f.verifierIf PaidQuoteVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = sig, payment = paymentArgs f )
+    "payload expired"
+
+-- A signature that does not cover the cost is rejected: the canonical text the
+-- signature commits to includes the cost, so signing a payload with a different
+-- fee yields a signature that fails to verify the presented payload.
+testSignatureNotCoveringCostRejected : Script ()
+testSignatureNotCoveringCostRejected = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload f now
+      otherCost = payload with cost = (payload.cost with fee = 1.0)
+  -- Sign the cheaper payload, present the real one: the signature is valid DER
+  -- but does not match the presented canonical text.
+  wrongSig <- signPaid f.keyPair.privateKey otherCost
+  submitFailsWith f.buyer f.verifierDisc
+    ( exerciseCmd f.verifierIf PaidQuoteVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = wrongSig, payment = paymentArgs f )
+    "invalid signature"
+
+-- A non-positive signed fee is rejected before any settlement. The fee is signed
+-- (so the signature check passes), proving `PaidQuoteVerifier_VerifyAndPay` enforces the positive-fee
+-- invariant itself rather than leaving it to the registry's amount check.
+testZeroFeeRejected : Script ()
+testZeroFeeRejected = do
+  f <- setup
+  now <- getTime
+  let base = defaultPayload f now
+      payload = base with cost = (base.cost with fee = 0.0)
+  sig <- signPaid f.keyPair.privateKey payload
+  submitFailsWithDiscs f
+    ( exerciseCmd f.verifierIf PaidQuoteVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = sig, payment = paymentArgs f )
+    "cost fee must be positive"
+
+-- The fee does not settle without the payee's standing preapproval: the registry
+-- refuses the transfer, so `PaidQuoteVerifier_VerifyAndPay` aborts and no quote is returned.
+testNoPreapprovalRejected : Script ()
+testNoPreapprovalRejected = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+  let noPreapproval = (paymentArgs f) with
+        context = ExtraArgs with context = emptyChoiceContext, meta = emptyMetadata
+  -- No preapproval disclosed and none supplied in the context: the factory
+  -- rejects the transfer on the receiver having no standing preapproval.
+  submitFailsWithDiscsNoPreapproval f
+    ( exerciseCmd f.verifierIf PaidQuoteVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = sig, payment = noPreapproval )
+    "receiver has no standing preapproval for this instrument"
+
+-- The payment instrument must match the signed cost: paying with a holding of a
+-- different instrument than the cost names is refused by the registry (the
+-- input holding does not match the transfer instrument), so the call aborts and
+-- nothing settles.
+testPaymentInstrumentMismatchRejected : Script ()
+testPaymentInstrumentMismatchRejected = do
+  f <- setup
+  now <- getTime
+  -- The buyer holds EUR; the signed cost is in USD. The transfer is for the
+  -- cost's instrument (USD), so the EUR input holding does not match it.
+  let eurInstrument = InstrumentId with admin = f.admin, id = "EUR"
+  eurHoldingCid <- submit f.admin $ createCmd RegistryHolding with
+    admin = f.admin, owner = f.buyer, instrumentId = eurInstrument, amount = 100.0
+  let payload = defaultPayload f now            -- cost.instrument = USD
+  sig <- signPaid f.keyPair.privateKey payload
+  let mismatchedPayment = (paymentArgs f) with
+        inputHoldingCids = [toInterfaceContractId @Holding eurHoldingCid]
+  submitFailsWithDiscs f
+    ( exerciseCmd f.verifierIf PaidQuoteVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = sig, payment = mismatchedPayment )
+    "input holding must match the transfer instrument"
+
+-- End-to-end paid verify-and-use: the consumer workflow authenticates a signed
+-- quote through a disclosed paid verifier, pays the fee to the treasury, and
+-- settles the trade at the verified price in a single transaction.
+testConsumerPaidWorkflowHappyPath : Script ()
+testConsumerPaidWorkflowHappyPath = do
+  f <- setup
+  seller <- allocateParty "Seller"
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+  offer <- submit seller $ createCmd PaidVerifiedQuoteTradeOffer with
+    seller, buyer = f.buyer, feedId = "BTC/USD", quantity = 2.0
+    verifierCid = f.verifierIf
+  settlementCid <- submit
+    ( actAs f.buyer
+        <> disclose f.verifierDisc
+        <> disclose f.factoryDisc
+        <> disclose f.preapprovalDisc
+    ) $
+    exerciseCmd offer AcceptPaidVerifiedQuoteTrade with
+      payload, signature = sig, payment = paymentArgs f
+  Some s <- queryContractId f.buyer settlementCid
+  s.price       === 65000.0
+  s.totalAmount === 130000.0
+  s.feedId      === "BTC/USD"
+  s.distributor === f.oracle
+
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  assertMsg "the treasury was paid the fee" (length treasuryHoldings == 1)
+
+-- | As `submitFailsWith`, attaching the verifier, factory, and preapproval
+-- disclosures the buyer needs to reach the full settlement path.
+submitFailsWithDiscs : PaidFixture -> Commands a -> Text -> Script ()
+submitFailsWithDiscs f cmds = expectAbort
+  ( trySubmit
+      ( actAs f.buyer
+          <> disclose f.verifierDisc
+          <> disclose f.factoryDisc
+          <> disclose f.preapprovalDisc
+      )
+      cmds
+  )
+
+-- | As `submitFailsWithDiscs`, but for the path that supplies no preapproval, so
+-- only the verifier and factory are disclosed.
+submitFailsWithDiscsNoPreapproval : PaidFixture -> Commands a -> Text -> Script ()
+submitFailsWithDiscsNoPreapproval f cmds = expectAbort
+  ( trySubmit
+      ( actAs f.buyer
+          <> disclose f.verifierDisc
+          <> disclose f.factoryDisc
+      )
+      cmds
+  )

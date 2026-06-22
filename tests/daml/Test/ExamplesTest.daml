@@ -110,8 +110,8 @@ testAcceptFailsAfterPriceRefresh = do
   Some disc <- queryDisclosure oracle priceCid
   _ <- submit oracle $ exerciseCmd priceCid UpdatePrice with
     newPrice = 66000.0, newAt = addRelTime now (minutes 1)
-  submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade)
-    "Could not find contract"
+  submitFailsMatching buyer disc (exerciseCmd offerCid AcceptTrade)
+    isContractNotFound "the refreshed publication's old contract id is gone"
 
 testConsumerTradesOffProducersQuote : Script ()
 testConsumerTradesOffProducersQuote = do
@@ -195,5 +195,5 @@ testQuoteAcceptFailsAfterRefresh = do
   let later = addRelTime now (minutes 1)
   _ <- submit oracle $ exerciseCmd quoteCid UpdateQuote with
     newPrice = 66000.0, newPriceTime = later, newPublishedAt = later
-  submitFailsWith buyer disc (exerciseCmd offerCid AcceptQuoteTrade)
-    "Could not find contract"
+  submitFailsMatching buyer disc (exerciseCmd offerCid AcceptQuoteTrade)
+    isContractNotFound "the refreshed quote's old contract id is gone"
