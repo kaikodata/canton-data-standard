@@ -1,0 +1,256 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The pay-as-you-go half of the signature-verifier standard. Where
+-- `DataStandard.QuoteVerifierV1` authenticates an off-ledger-signed quote and
+-- writes nothing, this interface authenticates the same kind of payload and, in
+-- the same transaction, settles a per-call fee to a recipient the verifier pins.
+-- A producer signs a quote together with the price of verifying it; a client
+-- materializes the signed record, supplies the holdings to pay with, and hands
+-- both to `PaidQuoteVerifier_VerifyAndPay`, receiving the same `VerifiedPayload` a free verifier
+-- returns once the fee has settled.
+--
+-- The fee is moved by a single direct Canton Token Standard transfer the caller
+-- authorizes alone: the caller is the transfer's sender, and the recipient is
+-- the verifier's pinned `payee`, never a party named in the payload. The payee
+-- may be a treasury distinct from the signing oracle. Settlement must complete
+-- in one step; a transfer left pending or failed aborts the whole verification,
+-- so a consumer never receives a verified quote it has not paid for, and never
+-- pays for a quote that does not verify.
+module DataStandard.PaidQuoteVerifierV1 where
+
+import DataStandard.QuoteVerifierV1 (SignedPayload(..), VerifiedPayload(..), canonicalQuoteText)
+import DataStandard.Utils (Quote)
+
+import DA.Crypto.Text (secp256k1, sha256, toHex)
+
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
+import Splice.Api.Token.MetadataV1 (ExtraArgs(..))
+import Splice.Api.Token.TransferInstructionV1
+  ( Transfer(..)
+  , TransferFactory
+  , TransferFactory_Transfer(..)
+  , TransferInstructionResult_Output(..)
+  )
+
+-- | The per-call price the producer signs into every paid payload. Because the
+-- cost is covered by the producer's signature, a payload's fee and the
+-- instrument it is denominated in cannot be altered without invalidating that
+-- signature, so a client cannot be made to pay more, or in the wrong asset,
+-- than the producer quoted.
+data Cost = Cost with
+    fee : Decimal
+      -- ^ The amount the caller pays to verify this payload, denominated in
+      -- `instrument`. The amount of the settling transfer; MUST be strictly
+      -- positive, and `PaidQuoteVerifier_VerifyAndPay` rejects a payload whose fee is not.
+    instrument : InstrumentId
+      -- ^ The instrument the fee is denominated in, identified by its admin and
+      -- id. The settling transfer is for this instrument, and the caller's input
+      -- holdings MUST be of it.
+  deriving (Eq, Show)
+
+-- | Everything the caller supplies to settle the fee. None of it is signed by
+-- the producer: the producer signs only what the fee is (`Cost`), never how it
+-- is paid. The caller chooses the factory, the holdings to spend, and the
+-- registry-supplied context, so the same signed payload can be paid by any
+-- client holding the instrument.
+data PaymentArgs = PaymentArgs with
+    transferFactoryCid : ContractId TransferFactory
+      -- ^ The Canton Token Standard transfer factory for the fee instrument's
+      -- registry. The caller exercises `TransferFactory_Transfer` on it; obtained
+      -- through explicit disclosure when the caller is not a stakeholder of it.
+    inputHoldingCids : [ContractId Holding]
+      -- ^ The caller's holdings to fund the fee from. Passed through to the
+      -- transfer unchanged; the registry archives them, so naming them lets the
+      -- caller use deliberate contention to prevent paying for the same call
+      -- twice. MUST be non-empty and owned by the caller.
+    context : ExtraArgs
+      -- ^ The registry-supplied choice context and metadata, threaded through to
+      -- the transfer unchanged. Carries the receive-side consent (for example the
+      -- payee's standing preapproval) the registry needs to settle directly.
+  deriving (Eq, Show)
+
+-- | The record a client reconstructs and hands to `PaidQuoteVerifier_VerifyAndPay`: the exact set
+-- of fields the producer signed off-ledger. It is the free verifier's payload
+-- plus the `Cost`, so the signature commits to the price of the call as well as
+-- the quote. The signature travels beside it as a `PaidQuoteVerifier_VerifyAndPay` argument, since
+-- a signature over these fields cannot also cover itself.
+data PaidSignedPayload = PaidSignedPayload with
+    publishedAt : Time
+      -- ^ When the producer produced and signed the quote. Becomes the
+      -- `publishedAt` of the returned `VerifiedPayload`; a consumer uses it for
+      -- staleness checks.
+    expiresAt : Time
+      -- ^ The instant after which the payload is no longer accepted.
+      -- `PaidQuoteVerifier_VerifyAndPay` rejects a payload presented strictly after this time and
+      -- also bounds the settling transfer to it, so a captured (payload,
+      -- signature) pair stops verifying and stops being payable once it lapses.
+    cost : Cost
+      -- ^ The price of verifying this payload. Signed by the producer, so it
+      -- cannot be tampered with; the fee actually settled is taken from here, not
+      -- from the caller.
+    quote : Quote
+      -- ^ The economic content: the feed, its price, and the market instant the
+      -- price is observed for. Identical in meaning to the free verifier's quote.
+  deriving (Eq, Show)
+
+-- | The on-ledger view every `PaidQuoteVerifier` implementation exposes. It
+-- names the producer, pins both the fee recipient and the public key, and
+-- advertises the encoding constants, so the key a payload is verified with and
+-- the party a fee is paid to are fixed by the contract a consumer chose to
+-- trust, never supplied alongside the payload.
+data PaidQuoteVerifierView = PaidQuoteVerifierView with
+    oracle : Party
+      -- ^ The producer that signed the payloads this verifier accepts, and the
+      -- party that signs the verifier contract. Becomes the `distributor` of
+      -- every `VerifiedPayload`. Need not be the party paid the fee.
+    payee : Party
+      -- ^ The fee recipient, pinned on the verifier. The settling transfer always
+      -- credits this party and never one named in the payload, so a payload
+      -- cannot redirect payment. MAY be a treasury distinct from `oracle`.
+    publicKey : Text
+      -- ^ The producer's secp256k1 public key, hex-encoded in DER form, against
+      -- which `PaidQuoteVerifier_VerifyAndPay` checks every signature. Resident on the contract
+      -- rather than passed per call, so a caller cannot substitute its own key.
+    hashMethod : Text
+      -- ^ The digest algorithm the signature commits to, the constant "SHA-256".
+      -- Advertised for off-ledger re-verification tooling; the on-ledger check is
+      -- fixed by this interface and does not read this field.
+    signMethod : Text
+      -- ^ The signature scheme, the constant "secp256k1". Advertised for the same
+      -- off-ledger tooling; the on-ledger check is fixed by this interface.
+    payloadCodec : Text
+      -- ^ The identifier of the canonical encoding the signature was produced
+      -- over, the constant "v1-paid-quote-concat". A consumer or auditor uses it
+      -- to select the matching off-ledger encoder when reproducing the text.
+  deriving (Eq, Show)
+
+-- | The identifier of the canonical encoding `PaidQuoteVerifier_VerifyAndPay` reproduces and
+-- checks the signature over. It extends the free verifier's "v1-quote-concat"
+-- with the cost, so it is a distinct codec with its own identifier; a producer's
+-- off-ledger signer must encode paid payloads with the matching algorithm.
+paidQuoteCodecId : Text
+paidQuoteCodecId = "v1-paid-quote-concat"
+
+-- | The canonical rendering of a `Cost`: the fee via Daml's `show` for `Decimal`
+-- (ten fractional digits at full scale, like the quote price), then the
+-- instrument's admin party and id, each followed by a "|"
+-- delimiter. The admin party is rendered with `partyToText` so the encoding is
+-- stable across participants. Appended after the free quote fields, it extends
+-- the encoding over the cost; like the quote prefix it stays injective only as
+-- long as its free-text field, the instrument `id`, carries no "|", which a
+-- producer's off-ledger signer must honour.
+canonicalCostText : Cost -> Text
+canonicalCostText c =
+     show c.fee            <> "|"
+  <> partyToText c.instrument.admin <> "|"
+  <> c.instrument.id       <> "|"
+
+-- | The canonical text of a paid payload under the "v1-paid-quote-concat"
+-- encoding: the free verifier's `canonicalQuoteText` over the quote and validity
+-- window, followed by `canonicalCostText` over the cost. The free prefix is
+-- reused verbatim so the two codecs share a byte-for-byte definition of the
+-- quote fields and only the cost suffix is new. Its injectivity carries the same
+-- conditions as its parts: `quote.feedId` and the instrument `id` must contain no
+-- "|". The signature is computed over this text; `PaidQuoteVerifier_VerifyAndPay` rebuilds it and
+-- checks the signature against it.
+paidCanonicalText : PaidSignedPayload -> Text
+paidCanonicalText p =
+     canonicalQuoteText (toQuotePayload p)
+  <> canonicalCostText p.cost
+
+-- | Project a paid payload onto the free verifier's quote-and-window payload so
+-- the shared canonical prefix is produced by the free verifier's encoder rather
+-- than duplicated here. Internal to the codec; the cost is carried separately.
+toQuotePayload : PaidSignedPayload -> SignedPayload
+toQuotePayload p = SignedPayload with
+  publishedAt = p.publishedAt
+  expiresAt = p.expiresAt
+  quote = p.quote
+
+-- | The digest the producer's signature commits to: the SHA-256 of the
+-- hex-encoded canonical text, itself hex-encoded. Used only as the
+-- `canonicalHash` evidence on a `VerifiedPayload`; the signature check itself
+-- lets the secp256k1 builtin hash the message internally.
+paidCanonicalHash : PaidSignedPayload -> Text
+paidCanonicalHash p = sha256 (toHex (paidCanonicalText p))
+
+-- | Whether `signature` is a valid producer signature over `payload`'s canonical
+-- text under `publicKey`. The secp256k1 builtin SHA-256s the message argument
+-- internally, so the message passed is the hex-encoded canonical text, matching
+-- a signature produced over the SHA-256 of that same hex text.
+paidSignatureValid : Text -> PaidSignedPayload -> Text -> Bool
+paidSignatureValid publicKey payload signature =
+  secp256k1 signature (toHex (paidCanonicalText payload)) publicKey
+
+-- | The paid signature-verifier interface. A producer implements it on a
+-- template it signs as a Daml party (the disclosed verifier contract); a
+-- consumer obtains that contract through explicit disclosure and reads
+-- authenticated quotes through `PaidQuoteVerifier_VerifyAndPay`, paying the producer's fee in the
+-- same transaction, while depending only on this package and never on the
+-- producer's. A breaking change to the verification policy, the encoding, or the
+-- payment shape is a new `-v2` package, since interface definitions cannot be
+-- smart-contract-upgraded.
+interface PaidQuoteVerifier where
+  viewtype PaidQuoteVerifierView
+
+  -- | Authenticate an off-ledger-signed quote and settle its fee, returning the
+  -- quote as a `VerifiedPayload`. The choice's only ledger effect is the fee
+  -- transfer: it neither creates nor archives the verifier, so one verifier
+  -- serves an unbounded stream of paid calls. It proceeds in a fixed order,
+  -- aborting deterministically at the first failure: it checks the payload has
+  -- not expired (the sole replay defence), checks the signature is valid under
+  -- the verifier's resident public key over the canonical text including the
+  -- cost, rejects a non-positive `cost.fee`, then settles the fee with a single
+  -- direct transfer from `actor` to the verifier's pinned `payee` and requires
+  -- that transfer to complete in one step.
+  -- A pending or failed settlement aborts the verification. Confirming the quote
+  -- is for an expected feed is the consumer's responsibility: the standard
+  -- authenticates the signer, not the feed.
+  nonconsuming choice PaidQuoteVerifier_VerifyAndPay : VerifiedPayload
+    with
+      actor : Party
+        -- ^ The party verifying the quote and paying its fee, the sole
+        -- controller of the choice and the sender of the settling transfer.
+        -- Self-authorizes both the read and the payment: a submitter cannot
+        -- verify, or spend, on behalf of a party it cannot act as.
+      payload : PaidSignedPayload
+        -- ^ The reconstructed record the producer signed off-ledger, including
+        -- the cost the fee is taken from.
+      signature : Text
+        -- ^ The producer's signature over `payload`'s canonical encoding,
+        -- hex-encoded DER ECDSA.
+      payment : PaymentArgs
+        -- ^ The factory, holdings, and registry context the caller settles the
+        -- fee with. The recipient and amount are not taken from here; they are
+        -- the verifier's `payee` and the payload's `cost.fee`.
+    controller actor
+    do
+      now <- getTime
+      assertMsg "payload expired" (now <= payload.expiresAt)
+      let v = view this
+      assertMsg "invalid signature" (paidSignatureValid v.publicKey payload signature)
+      assertMsg "cost fee must be positive" (payload.cost.fee > 0.0)
+      let transfer = Transfer with
+            sender = actor
+            receiver = v.payee
+            amount = payload.cost.fee
+            instrumentId = payload.cost.instrument
+            requestedAt = now
+            executeBefore = payload.expiresAt
+            inputHoldingCids = payment.inputHoldingCids
+            meta = payment.context.meta
+      result <- exercise payment.transferFactoryCid TransferFactory_Transfer with
+        expectedAdmin = payload.cost.instrument.admin
+        transfer
+        extraArgs = payment.context
+      case result.output of
+        TransferInstructionResult_Completed _ -> pure ()
+        _ -> abort "fee did not settle in one step"
+      pure VerifiedPayload with
+        distributor   = v.oracle
+        publishedAt   = payload.publishedAt
+        quote         = payload.quote
+        canonicalHash = paidCanonicalHash payload
+        signature     = signature
+        publicKey     = v.publicKey

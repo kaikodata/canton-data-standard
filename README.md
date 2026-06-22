@@ -8,6 +8,15 @@ A provider publishes market data by implementing a shared interface on its own
 contracts. A consumer reads that data through the same interface. Neither side
 depends on the other's code, only on the interface packages in this repository.
 
+The standard offers two ways to deliver the same data. The push interfaces
+(`PublishedData`, `PublishedQuote`) distribute data as on-ledger contracts the
+producer signs as a Daml party. The verifier interfaces (`QuoteVerifier`,
+`PaidQuoteVerifier`) distribute data the producer signs off-ledger with an
+ECDSA key, so a consumer pulls a signed quote and authenticates it on demand
+against a long-lived verifier contract that holds the producer's public key. A
+verified quote is field-aligned with a pushed one, so consumer code that reads
+a price is the same either way.
+
 The generic `PublishedData` interface fixes the shape a consumer reads: a
 distributor, a publication time, a schema version, and a key/value payload. It
 does not fix the keys inside that payload. A consumer and the providers it
@@ -22,14 +31,23 @@ shape a consumer builds against stays fixed for the life of a version.
 
 | Path | Package | What it is |
 |---|---|---|
-| `interfaces/canton-data-standard-utils-v1` | `canton-data-standard-utils-v1` | The shared value model: `AnyValue`/`Values`, the `Quote` record, `Metadata`, and typed accessors. Kept separate because it can evolve through smart-contract upgrades, which interface-defining packages cannot. |
+| `interfaces/canton-data-standard-utils-v1` | `canton-data-standard-utils-v1` | The shared value model: `AnyValue`/`Values`, the `Quote` record, `Metadata`, and typed accessors. Kept separate because it can evolve through smart-contract upgrades, which interface-defining packages cannot. Its `Metadata` and `AnyValue` deliberately mirror the Canton Token Standard's types rather than importing them, so the push interfaces carry no token-standard dependency. |
 | `interfaces/canton-data-standard-datapoint-v1` | `canton-data-standard-datapoint-v1` | The generic `PublishedData` interface: a key/value payload (`Values`), publication time, schema version, and extensibility metadata. |
 | `examples/datapoint-producer` | `datapoint-producer-example` | A reference producer: a price-publication template implementing `PublishedData`. |
 | `examples/datapoint-consumer` | `datapoint-consumer-example` | A reference consumer: a trade workflow that reads any `PublishedData` implementation. Depends only on the interface packages. |
 | `interfaces/canton-data-standard-quote-v1` | `canton-data-standard-quote-v1` | The typed `PublishedQuote` interface: a `Quote` (feed, price, and observation time) plus a publication time and extensibility metadata. Independent of `PublishedData`. |
 | `examples/quote-producer` | `quote-producer-example` | A reference producer: a quote-publication template implementing `PublishedQuote`. |
 | `examples/quote-consumer` | `quote-consumer-example` | A reference consumer: a trade workflow that reads any `PublishedQuote` implementation. Depends only on the interface packages. |
-| `tests` | `canton-data-standard-tests` | Daml Script tests for everything above. |
+| `interfaces/canton-data-standard-quote-verifier-v1` | `canton-data-standard-quote-verifier-v1` | The `QuoteVerifier` interface: a long-lived contract that holds a producer's secp256k1 public key and authenticates off-ledger-signed quotes through a pure `QuoteVerifier_Verify` choice that writes nothing to the ledger. |
+| `interfaces/canton-data-standard-paid-quote-verifier-v1` | `canton-data-standard-paid-quote-verifier-v1` | The `PaidQuoteVerifier` interface: the pay-as-you-go sibling of `QuoteVerifier`. `PaidQuoteVerifier_VerifyAndPay` authenticates a quote and settles a producer-signed per-call fee, with a single Canton Token Standard transfer, in one transaction. |
+| `examples/verifier-producer` | `verifier-producer-example` | A reference producer: a `SignatureVerifier` template implementing the free `QuoteVerifier`, holding the public key. Token-free. |
+| `examples/verifier-consumer` | `verifier-consumer-example` | A reference consumer: a trade workflow that authenticates a pulled quote through a disclosed `QuoteVerifier`. Depends only on the interface packages, and is token-free. |
+| `examples/paid-verifier-producer` | `paid-verifier-producer-example` | A reference producer for the paid path: a `PaidSignatureVerifier` template implementing `PaidQuoteVerifier`, holding the public key and the fee payee. |
+| `examples/paid-verifier-consumer` | `paid-verifier-consumer-example` | A reference consumer for the paid path: a trade workflow that authenticates a pulled quote through a disclosed `PaidQuoteVerifier` and pays the per-call fee. Reuses the settlement record from `verifier-consumer`. |
+| `examples/test-token-registry` | `test-token-registry` | A test-only registry implementing the Canton Token Standard holding and transfer interfaces, so the paid-verifier tests can settle a real one-step transfer. Not part of the standard. |
+| `tests` | `canton-data-standard-tests` | Daml Script tests for the push interfaces. Token-free and crypto-free, so its DAR runs against a live Canton ledger. |
+| `tests-crypto` | `canton-data-standard-tests-crypto` | Daml Script tests for the `QuoteVerifier` signature path, kept separate because they use Daml Script's `secp256k1` helpers, whose values the live-ledger script runner cannot load. They run in-memory. |
+| `tests-paid` | `canton-data-standard-tests-paid` | Daml Script tests for the paid path, which exercise the Canton Token Standard settlement and so depend on the token packages. |
 
 ## Build and test
 
@@ -51,10 +69,12 @@ make ci             # headers-check, build, validate and test
 
 ## Reading and writing data
 
-- [Producer guide](docs/producer-guide.md): implement `PublishedData` on your
-  own template and publish.
+- [Producer guide](docs/producer-guide.md): implement `PublishedData`,
+  `PublishedQuote`, or a verifier interface on your own template and distribute,
+  by push or by off-ledger signing.
 - [Consumer guide](docs/consumer-guide.md): read published data through the
-  interface, including contracts you are not a stakeholder of.
+  interface, including contracts you are not a stakeholder of, whether pushed to
+  you or pulled and verified on demand.
 
 ## Versioning policy
 

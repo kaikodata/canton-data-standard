@@ -119,6 +119,116 @@ a data point: confirm `quote.feedId` is the feed you expect, and bound the age
 of `publishedAt` for your staleness policy. The standard authenticates the
 `distributor`, not the feed identity.
 
+## Reading a pulled, signed quote
+
+The interfaces above read a quote the producer pushed onto the ledger as a
+contract. The verifier interfaces read a quote the producer signed off-ledger
+and you pulled in: you obtain the signed bytes through the producer's own channel
+and authenticate them on demand. There is no contract per quote. The producer
+publishes one long-lived verifier contract holding its public key, and you
+verify any number of pulled quotes against it.
+
+Depend on the verifier interface DAR, and reference the verifier as
+`ContractId QuoteVerifier`, the interface, never a producer's template:
+
+```yaml
+data-dependencies:
+  - <path-to>/canton-data-standard-utils-v1-0.1.0.dar
+  - <path-to>/canton-data-standard-quote-verifier-v1-0.1.0.dar
+```
+
+You obtain the verifier contract through explicit disclosure, the same as any
+contract you are not a stakeholder of, and you reconstruct the signed quote into
+a `SignedPayload`: the `publishedAt`, the `expiresAt` the producer signed, and
+the `quote` itself. The signature travels beside it, not inside it. You hand both
+to the `QuoteVerifier_Verify` choice:
+
+```daml
+import DataStandard.QuoteVerifierV1
+
+choice AcceptVerifiedQuoteTrade : ContractId VerifiedQuoteTradeSettlement
+  with
+    payload   : SignedPayload
+    signature : Text
+  controller buyer
+  do
+    v <- exercise verifierCid QuoteVerifier_Verify with actor = buyer, payload, signature
+    assertMsg "feed mismatch" (v.quote.feedId == feedId)
+    ...  -- settle at v.quote.price
+```
+
+The full version lives in
+[`examples/verifier-consumer`](../examples/verifier-consumer).
+
+`QuoteVerifier_Verify` writes nothing to the ledger. It checks the payload has not expired and
+that the signature is valid under the verifier's resident public key, then
+returns a `VerifiedPayload` you use in the same transaction. A bad signature or
+an expired payload aborts the whole transaction, so nothing settles against an
+unauthenticated price. Because the choice creates and archives nothing, one
+verifier serves every consumer and every quote at once, with no contention.
+
+The `VerifiedPayload` you get back is field-aligned with `PublishedQuoteView`:
+its `distributor`, `publishedAt`, and `quote` carry the same meaning, so the code
+that reads a verified price is identical to the code that reads a pushed one. The
+`distributor` is taken from the verifier, never from the payload, so a quote
+cannot claim a producer it was not signed by. It also carries the
+`canonicalHash`, `signature`, and `publicKey` as evidence, so the verification
+can be reproduced off-ledger later.
+
+The checks that remain yours are the same as before. The standard authenticates
+the signer, not the feed, so confirm `quote.feedId` is the feed you expect (the
+feed-mismatch check above). The `expiresAt` window is the only replay defence the
+standard provides, so for a tighter staleness policy bound the age of
+`publishedAt` yourself.
+
+## Reading a pulled quote and paying for it
+
+`PaidQuoteVerifier` is the same flow with a fee attached. You reconstruct a
+`PaidSignedPayload`, which is the free payload plus the `Cost` the producer
+signed, and you supply `PaymentArgs`: the Canton Token Standard transfer factory
+for the fee instrument, the holdings to pay from, and the registry-supplied
+context. You hand all of it to `PaidQuoteVerifier_VerifyAndPay`:
+
+```daml
+import DataStandard.PaidQuoteVerifierV1
+
+choice AcceptPaidVerifiedQuoteTrade : ContractId VerifiedQuoteTradeSettlement
+  with
+    payload   : PaidSignedPayload
+    signature : Text
+    payment   : PaymentArgs
+  controller buyer
+  do
+    v <- exercise verifierCid PaidQuoteVerifier_VerifyAndPay with
+      actor = buyer, payload, signature, payment
+    assertMsg "feed mismatch" (v.quote.feedId == feedId)
+    ...  -- settle at v.quote.price
+```
+
+The full version lives in
+[`examples/paid-verifier-consumer`](../examples/paid-verifier-consumer); it
+settles into the same `VerifiedQuoteTradeSettlement` record the free
+[`examples/verifier-consumer`](../examples/verifier-consumer) produces.
+
+`PaidQuoteVerifier_VerifyAndPay` authenticates the payload and settles the fee atomically. The fee
+amount and the asset come from the `Cost` the producer signed, not from your
+arguments, and the recipient is the `payee` pinned on the verifier, not a party
+in the payload, so you cannot be charged more than quoted and the payment cannot
+be redirected. The transfer is a single direct Canton Token Standard transfer
+you authorize as the sender; if it does not settle in one step the whole
+verification aborts, so you never receive a verified quote you have not paid for,
+and never pay for one that does not verify.
+
+Two things you supply are worth calling out. The `inputHoldingCids` are your own
+holdings of the fee instrument; naming specific ones lets you use deliberate
+contention to avoid paying twice for the same call. The `context` carries the
+receive-side consent the registry needs to settle directly, typically the payee's
+standing transfer preapproval, which the payee or its registry sets up out of
+band. You obtain the transfer factory contract, and the verifier itself, through
+explicit disclosure when you are not a stakeholder of them. The paid path needs
+the Canton Token Standard interface DARs from [`dependencies/`](../dependencies)
+on your `daml.yaml` alongside the verifier DAR.
+
 ## Reading at scale
 
 For querying many feeds across providers, prefer the

@@ -1,0 +1,14 @@
+sdk-version: 3.4.11
+name: canton-data-standard-quote-verifier-v1
+source: daml
+version: 0.1.0
+dependencies:
+  - daml-prim
+  - daml-stdlib
+data-dependencies:
+  - ../canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.0.dar
+build-options:
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches
+  - --target=2.1
+  - -Wno-crypto-text-is-alpha

@@ -1,12 +1,24 @@
 # Build order for the standard's packages. Interface packages live under
 # interfaces/ (one package per interface version); examples and tests build
-# against their compiled DARs.
+# against their compiled DARs. The free path (quote verifier + free examples +
+# tests) carries no token-standard dependency, so its tests DAR runs under the
+# live Ledger API gate; the paid path (paid quote verifier + paid examples +
+# tests-paid) is token-coupled and exercised in-memory.
 packages:
 - ./interfaces/canton-data-standard-utils-v1
 - ./interfaces/canton-data-standard-datapoint-v1
 - ./interfaces/canton-data-standard-quote-v1
+- ./interfaces/canton-data-standard-quote-verifier-v1
+- ./interfaces/canton-data-standard-paid-quote-verifier-v1
 - ./examples/datapoint-producer
 - ./examples/datapoint-consumer
 - ./examples/quote-producer
 - ./examples/quote-consumer
+- ./examples/verifier-producer
+- ./examples/verifier-consumer
+- ./examples/paid-verifier-producer
+- ./examples/paid-verifier-consumer
+- ./examples/test-token-registry
 - ./tests
+- ./tests-crypto
+- ./tests-paid

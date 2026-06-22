@@ -1,0 +1,92 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | A reference consumer for the Data Standard's free verifier interface. It
+-- depends only on the interface packages and names no producer's template. The
+-- workflow demonstrates verify-and-use in a single transaction: the buyer
+-- supplies an off-ledger-signed payload, the choice authenticates it through a
+-- disclosed `QuoteVerifier`, confirms it is for the expected feed, and settles
+-- the trade at the verified price. Reading a verified quote is identical to
+-- reading a pushed one, because `VerifiedPayload` is field-aligned with
+-- `PublishedQuoteView`. The pay-as-you-go workflow lives in the
+-- `paid-verifier-consumer` example.
+module VerifierConsumer.Trading where
+
+import DataStandard.QuoteVerifierV1
+
+-- | An offer to trade `quantity` of `feedId` at whatever price a quote signed by
+-- the trusted producer carries, where the producer is the one behind the
+-- referenced verifier.
+template VerifiedQuoteTradeOffer
+  with
+    seller : Party
+      -- ^ The party offering the trade; signs the offer.
+    buyer : Party
+      -- ^ The counterparty who accepts and supplies the signed quote.
+    feedId : Text
+      -- ^ The feed the buyer expects the quote to be for. Checked against the
+      -- verified quote, because the standard authenticates the signer, not the
+      -- feed.
+    quantity : Decimal
+      -- ^ The amount of the feed's instrument to settle.
+    verifierCid : ContractId QuoteVerifier
+      -- ^ Any `QuoteVerifier`, identified through the interface rather than a
+      -- concrete template. The buyer obtains it through explicit disclosure when
+      -- accepting.
+  where
+    signatory seller
+    observer buyer
+
+    -- | Settle the trade at the price of a producer-signed quote, in the buyer's
+    -- transaction. The signed payload is authenticated through `QuoteVerifier_Verify`; a wrong
+    -- feed, an expired payload, or a bad signature aborts the whole transaction,
+    -- so no settlement is recorded against an unverified price. A production
+    -- consumer would also bound the age of `publishedAt`.
+    choice AcceptVerifiedQuoteTrade : ContractId VerifiedQuoteTradeSettlement
+      with
+        payload : SignedPayload
+          -- ^ The off-ledger-signed quote the buyer materialized.
+        signature : Text
+          -- ^ The producer's signature over the payload's canonical encoding.
+      controller buyer
+      do
+        v <- exercise verifierCid QuoteVerifier_Verify with actor = buyer, payload, signature
+        assertMsg "feed mismatch" (v.quote.feedId == feedId)
+        create VerifiedQuoteTradeSettlement with
+          seller, buyer, feedId, quantity
+          price       = v.quote.price
+          totalAmount = v.quote.price * quantity
+          distributor = v.distributor
+          priceTime   = v.quote.priceTime
+          publishedAt = v.publishedAt
+
+    -- | Withdraw the offer.
+    choice CancelVerifiedQuoteOffer : ()
+      controller seller
+      do pure ()
+
+-- | The record of a settled trade, capturing which producer's signed quote was
+-- used, the market time it priced (`priceTime`), and when the producer produced
+-- it (`publishedAt`), so a later staleness review has both timestamps.
+template VerifiedQuoteTradeSettlement
+  with
+    seller : Party
+      -- ^ The offering party.
+    buyer : Party
+      -- ^ The accepting party.
+    feedId : Text
+      -- ^ The settled feed.
+    quantity : Decimal
+      -- ^ The settled quantity.
+    price : Decimal
+      -- ^ The verified price the trade settled at.
+    totalAmount : Decimal
+      -- ^ `price * quantity`, recorded so the settled total needs no recompute.
+    distributor : Party
+      -- ^ The producer whose signature authenticated the price.
+    priceTime : Time
+      -- ^ The market instant the price was observed for.
+    publishedAt : Time
+      -- ^ When the producer produced the quote.
+  where
+    signatory seller, buyer

@@ -1,0 +1,21 @@
+# A test-only registry that implements the genuine Canton Token Standard V1
+# interfaces (holding, transfer-instruction, metadata) so a Daml Script can
+# settle a real one-step transfer. It stands in for the registry/wallet app that
+# would issue holdings and run the transfer factory in production. Kept apart
+# from the test scripts so this template-defining package stays free of
+# daml-script.
+sdk-version: 3.4.11
+name: test-token-registry
+source: daml
+version: 0.1.0
+dependencies:
+  - daml-prim
+  - daml-stdlib
+data-dependencies:
+  - ../../dependencies/splice-api-token-holding-v1-1.0.0.dar
+  - ../../dependencies/splice-api-token-metadata-v1-1.0.0.dar
+  - ../../dependencies/splice-api-token-transfer-instruction-v1-1.0.0.dar
+build-options:
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches
+  - --target=2.1

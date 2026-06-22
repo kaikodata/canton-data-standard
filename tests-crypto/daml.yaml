@@ -1,0 +1,19 @@
+sdk-version: 3.4.11
+name: canton-data-standard-tests-crypto
+source: daml
+version: 0.1.0
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+data-dependencies:
+  - ../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.0.dar
+  - ../interfaces/canton-data-standard-quote-verifier-v1/.daml/dist/canton-data-standard-quote-verifier-v1-0.1.0.dar
+  - ../examples/verifier-producer/.daml/dist/verifier-producer-example-0.1.0.dar
+  - ../examples/verifier-consumer/.daml/dist/verifier-consumer-example-0.1.0.dar
+  - ../tests/.daml/dist/canton-data-standard-tests-0.1.0.dar
+build-options:
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches
+  - --target=2.1
+  - -Wno-crypto-text-is-alpha

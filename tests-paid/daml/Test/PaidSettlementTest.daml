@@ -1,0 +1,163 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Settlement spike: proves the showstopper risk for the paid verifier under
+-- the genuine Canton Token Standard V1 interfaces. A one-step direct transfer
+-- settles to a receiver that is a different party from the sender, authorized by
+-- the sender alone, with receive-side consent supplied by a standing
+-- preapproval the receiver maintains. The receiver is not a controller of the
+-- transfer choice and does not co-sign the settling submission.
+--
+-- If this could not be done with sender-only authority, the paid verifier's
+-- direct-transfer payment model would be unworkable; this test is the gate that
+-- de-risks it before the payment path is wired into the verifier.
+module Test.PaidSettlementTest where
+
+import DA.Assert ((===))
+import DA.Time (addRelTime, hours)
+import qualified DA.TextMap as TM
+import Daml.Script
+
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId(..))
+import Splice.Api.Token.MetadataV1
+import Splice.Api.Token.TransferInstructionV1
+import TestTokenRegistry.Registry
+import Test.Fixtures (submitFailsWith)
+
+-- | A staged transfer: a funded sender, a distinct receiving treasury holding a
+-- standing preapproval, an instrument admin, the factory the sender exercises,
+-- and the disclosures the sender needs to reach the admin-signed factory and the
+-- treasury-signed preapproval.
+data SettlementFixture = SettlementFixture with
+    admin : Party
+    sender : Party
+    treasury : Party
+    instrumentId : InstrumentId
+    senderHoldingCid : ContractId RegistryHolding
+    factoryCid : ContractId TransferFactory
+    factoryDisc : Disclosure
+    preapprovalCid : ContractId TransferPreapproval
+    preapprovalDisc : Disclosure
+
+-- | Stage the fixture: the admin issues the sender a holding and a factory, the
+-- treasury publishes a standing preapproval, and the sender-visible disclosures
+-- are captured.
+setup : Script SettlementFixture
+setup = do
+  admin <- allocateParty "RegistryAdmin"
+  sender <- allocateParty "Sender"
+  treasury <- allocateParty "Treasury"
+  let instrumentId = InstrumentId with admin, id = "USD"
+
+  senderHoldingCid <- submit admin $ createCmd RegistryHolding with
+    admin, owner = sender, instrumentId, amount = 100.0
+
+  factoryTplCid <- submit admin $ createCmd RegistryTransferFactory with admin
+  let factoryCid = toInterfaceContractId @TransferFactory factoryTplCid
+  Some factoryDisc <- queryDisclosure admin factoryTplCid
+
+  preapprovalCid <- submit treasury $ createCmd TransferPreapproval with
+    admin, receiver = treasury, instrumentId
+  Some preapprovalDisc <- queryDisclosure treasury preapprovalCid
+
+  pure SettlementFixture with
+    admin, sender, treasury, instrumentId
+    senderHoldingCid, factoryCid, factoryDisc
+    preapprovalCid, preapprovalDisc
+
+-- | Build the standard extra-args carrying the receiver's preapproval contract
+-- in the choice context under the registry's well-known key.
+preapprovalArgs : ContractId TransferPreapproval -> ExtraArgs
+preapprovalArgs cid = ExtraArgs with
+  context = ChoiceContext with
+    values = TM.fromList
+      [ (preapprovalContextKey, AV_ContractId (coerceContractId cid)) ]
+  meta = emptyMetadata
+
+-- The gate. The sender alone settles a transfer to a distinct treasury in one
+-- step: the result is Completed, the sender's input holding is gone, and the
+-- treasury holds exactly one new holding for the transferred amount. No
+-- TransferInstruction is left pending and the receiver never authorizes the
+-- submission.
+testOneStepTransferToReceiver : Script ()
+testOneStepTransferToReceiver = do
+  f <- setup
+  now <- getTime
+  let transfer = Transfer with
+        sender = f.sender
+        receiver = f.treasury
+        amount = 100.0
+        instrumentId = f.instrumentId
+        requestedAt = now
+        executeBefore = addRelTime now (hours 1)
+        inputHoldingCids = [toInterfaceContractId @Holding f.senderHoldingCid]
+        meta = emptyMetadata
+
+  -- Sender-only authority: actAs the sender, never the treasury. The factory and
+  -- the treasury's preapproval reach the sender by explicit disclosure.
+  result <- submit
+    ( actAs f.sender
+        <> disclose f.factoryDisc
+        <> disclose f.preapprovalDisc
+    ) $
+    exerciseCmd f.factoryCid TransferFactory_Transfer with
+      expectedAdmin = f.admin
+      transfer
+      extraArgs = preapprovalArgs f.preapprovalCid
+
+  -- Settled in one step.
+  case result.output of
+    TransferInstructionResult_Completed cids ->
+      assertMsg "completed transfer credits exactly one receiver holding"
+        (length cids == 1)
+    other ->
+      abort ("expected a Completed transfer, got: " <> show other)
+
+  -- No pending instruction was left behind.
+  pendingInstructions <- query @RegistryTransferInstruction f.admin
+  assertMsg "no transfer instruction is left pending" (null pendingInstructions)
+
+  -- The sender's input holding was spent.
+  senderHolding <- queryContractId f.admin f.senderHoldingCid
+  assertMsg "sender input holding is archived" (senderHolding == None)
+
+  -- The treasury now holds exactly one holding, for the transferred amount, and
+  -- it is genuinely the treasury's, not the sender's.
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  credited <- case treasuryHoldings of
+    [(_, h)] -> pure h
+    _ -> abort ("expected exactly one treasury holding, got: " <> show (length treasuryHoldings))
+  credited.owner === f.treasury
+  credited.amount === 100.0
+  credited.instrumentId === f.instrumentId
+
+  -- The credited holding's interface view confirms the standard sees the
+  -- treasury as the owner of the moved funds.
+  let creditedView = view (toInterface @Holding credited)
+  creditedView.owner === f.treasury
+  creditedView.amount === 100.0
+
+-- Control: with no preapproval supplied in the choice context, the same
+-- sender-only transfer is refused. Receive-side consent is mandatory, proving
+-- the happy path settles because of the preapproval, not in spite of a missing
+-- check.
+testTransferWithoutPreapprovalRejected : Script ()
+testTransferWithoutPreapprovalRejected = do
+  f <- setup
+  now <- getTime
+  let transfer = Transfer with
+        sender = f.sender
+        receiver = f.treasury
+        amount = 100.0
+        instrumentId = f.instrumentId
+        requestedAt = now
+        executeBefore = addRelTime now (hours 1)
+        inputHoldingCids = [toInterfaceContractId @Holding f.senderHoldingCid]
+        meta = emptyMetadata
+  submitFailsWith f.sender f.factoryDisc
+    ( exerciseCmd f.factoryCid TransferFactory_Transfer with
+        expectedAdmin = f.admin
+        transfer
+        extraArgs = ExtraArgs with context = emptyChoiceContext, meta = emptyMetadata
+    )
+    "receiver has no standing preapproval for this instrument"

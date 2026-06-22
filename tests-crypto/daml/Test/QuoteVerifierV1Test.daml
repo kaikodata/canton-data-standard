@@ -1,0 +1,232 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the `QuoteVerifier` interface against real secp256k1 keys. Each
+-- script generates a keypair with `secp256k1generatekeypair`, signs the
+-- canonical text of a payload with `secp256k1sign`, and exercises
+-- `QuoteVerifier_Verify`
+-- against a verifier created with the matching public key. Negative cases assert
+-- the specific abort message so each failure is shown to be for its intended
+-- reason. The verifier-consumer workflow is exercised here too, demonstrating
+-- verify-and-use through a disclosed verifier.
+module Test.QuoteVerifierV1Test where
+
+import DA.Assert ((===))
+import DA.Crypto.Text (toHex)
+import DA.Optional (isSome)
+import DA.Time (addRelTime, hours, minutes)
+import Daml.Script
+
+import DataStandard.QuoteVerifierV1
+import DataStandard.Utils (Quote(..))
+import VerifierProducer.SignatureVerifier
+import VerifierConsumer.Trading
+import Test.Fixtures (submitFailsWith)
+
+-- | A keypair, the on-ledger verifier created with its public key, and the
+-- disclosure blob a non-stakeholder needs to exercise `QuoteVerifier_Verify`.
+data VerifierFixture = VerifierFixture with
+    oracle      : Party
+    reader      : Party
+    keyPair     : Secp256k1KeyPair
+    verifierTpl : ContractId SignatureVerifier
+    verifierIf  : ContractId QuoteVerifier
+    disc        : Disclosure
+
+-- | Allocate parties, generate a real secp256k1 keypair, publish a verifier
+-- holding the public key, and capture its disclosure.
+setup : Script VerifierFixture
+setup = do
+  oracle  <- allocateParty "Oracle"
+  reader  <- allocateParty "Reader"
+  keyPair <- secp256k1generatekeypair
+  verifierTpl <- submit oracle $ createCmd SignatureVerifier with
+    oracle
+    publicKey = keyPair.publicKey
+  Some disc <- queryDisclosure oracle verifierTpl
+  pure VerifierFixture with
+    oracle, reader, keyPair, verifierTpl, disc
+    verifierIf = toInterfaceContractId @QuoteVerifier verifierTpl
+
+-- | A standard, valid payload: BTC/USD @ 65000, published now, expiring in 1h.
+defaultPayload : Time -> SignedPayload
+defaultPayload now = SignedPayload with
+  publishedAt = now
+  expiresAt   = addRelTime now (hours 1)
+  quote = Quote with
+    feedId    = "BTC/USD"
+    price     = 65000.0
+    priceTime = addRelTime now (minutes (-1))
+
+-- | Sign a payload's canonical text with a private key, producing the same
+-- signature the producer would off-ledger. `secp256k1sign` SHA-256s the
+-- hex-encoded message internally, matching the on-ledger `secp256k1` check.
+signQuote : Text -> SignedPayload -> Script Text
+signQuote privateKey payload =
+  secp256k1sign privateKey (toHex (canonicalQuoteText payload))
+
+-- A valid signature verifies and returns the quote field-aligned with the
+-- pushed view, plus the evidence triple.
+testVerifyHappyPath : Script ()
+testVerifyHappyPath = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload now
+  sig <- signQuote f.keyPair.privateKey payload
+  verified <- submit (actAs f.reader <> disclose f.disc) $
+    exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload, signature = sig
+  verified.distributor    === f.oracle
+  verified.quote.feedId   === "BTC/USD"
+  verified.quote.price    === 65000.0
+  verified.quote.priceTime === payload.quote.priceTime
+  verified.publishedAt    === payload.publishedAt
+  verified.canonicalHash  === quoteCanonicalHash payload
+  verified.signature      === sig
+  verified.publicKey       === f.keyPair.publicKey
+
+-- A well-formed signature that belongs to a different payload is rejected: it
+-- is valid DER but does not match the presented payload, so the secp256k1 check
+-- returns false rather than aborting on a malformed argument.
+testTamperedSignatureRejected : Script ()
+testTamperedSignatureRejected = do
+  f <- setup
+  now <- getTime
+  let payload      = defaultPayload now
+      otherPayload = payload with quote = (payload.quote with feedId = "ETH/USD")
+  wrongSig <- signQuote f.keyPair.privateKey otherPayload
+  submitFailsWith f.reader f.disc
+    (exerciseCmd f.verifierIf QuoteVerifier_Verify with
+      actor = f.reader, payload, signature = wrongSig)
+    "invalid signature"
+
+-- A malformed (non-DER) signature is rejected deterministically by the builtin
+-- before the signature can be checked, on its own distinct message.
+testMalformedSignatureRejected : Script ()
+testMalformedSignatureRejected = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload now
+  submitFailsWith f.reader f.disc
+    (exerciseCmd f.verifierIf QuoteVerifier_Verify with
+      actor = f.reader, payload, signature = "00bad00signature")
+    "not a DER encoded hex string"
+
+-- A valid signature over one payload does not verify a payload with a mutated
+-- quote field: the signature covers the encoded quote, so tampering invalidates
+-- it.
+testTamperedQuoteRejected : Script ()
+testTamperedQuoteRejected = do
+  f <- setup
+  now <- getTime
+  let payloadA = defaultPayload now
+  sigA <- signQuote f.keyPair.privateKey payloadA
+  let payloadB = payloadA with quote = (payloadA.quote with price = 99999.0)
+  submitFailsWith f.reader f.disc
+    (exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload = payloadB, signature = sigA)
+    "invalid signature"
+
+-- A correctly-signed payload past its expiry is rejected: expiry is the sole
+-- replay defence.
+testExpiredRejected : Script ()
+testExpiredRejected = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload now            -- expires now + 1h
+  sig <- signQuote f.keyPair.privateKey payload
+  passTime (hours 2)                          -- move strictly past expiresAt
+  submitFailsWith f.reader f.disc
+    (exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload, signature = sig)
+    "payload expired"
+
+-- The boundary instant is accepted: a payload presented exactly at expiresAt
+-- still verifies (the check is `now <= expiresAt`).
+testExpiryBoundaryAccepted : Script ()
+testExpiryBoundaryAccepted = do
+  f <- setup
+  now <- getTime
+  let payload = (defaultPayload now) with expiresAt = now
+  sig <- signQuote f.keyPair.privateKey payload
+  verified <- submit (actAs f.reader <> disclose f.disc) $
+    exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload, signature = sig
+  verified.quote.feedId === "BTC/USD"
+
+-- Verifying without disclosing the verifier fails on visibility, before any
+-- business check.
+testVerifyWithoutDisclosureFails : Script ()
+testVerifyWithoutDisclosureFails = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload now
+  sig <- signQuote f.keyPair.privateKey payload
+  r <- trySubmit (actAs f.reader)
+    (exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload, signature = sig)
+  case r of
+    Right _ -> abort "expected a visibility failure"
+    Left _  -> pure ()
+
+-- The verifier is nonconsuming: it survives a verification and is reusable
+-- across payloads.
+testVerifierReusable : Script ()
+testVerifierReusable = do
+  f <- setup
+  now <- getTime
+  let p1 = defaultPayload now
+      p2 = p1 with quote = (p1.quote with feedId = "ETH/USD", price = 3200.0)
+  s1 <- signQuote f.keyPair.privateKey p1
+  s2 <- signQuote f.keyPair.privateKey p2
+  _ <- submit (actAs f.reader <> disclose f.disc) $
+    exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload = p1, signature = s1
+  _ <- submit (actAs f.reader <> disclose f.disc) $
+    exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload = p2, signature = s2
+  active <- queryContractId f.oracle f.verifierTpl
+  assertMsg "nonconsuming verifier stays active" (isSome active)
+
+-- A key signed by one producer does not verify on a verifier holding a
+-- different producer's key. Models key rotation: a payload signed under the new
+-- key fails on the old (still-active) verifier.
+testWrongKeyRejected : Script ()
+testWrongKeyRejected = do
+  f <- setup
+  now <- getTime
+  other <- secp256k1generatekeypair
+  let payload = defaultPayload now
+  sigOther <- signQuote other.privateKey payload
+  submitFailsWith f.reader f.disc
+    (exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload, signature = sigOther)
+    "invalid signature"
+
+-- End-to-end verify-and-use: the consumer workflow authenticates a signed quote
+-- through a disclosed verifier and settles at the verified price.
+testConsumerWorkflowHappyPath : Script ()
+testConsumerWorkflowHappyPath = do
+  f <- setup
+  seller <- allocateParty "Seller"
+  now <- getTime
+  let payload = defaultPayload now
+  sig <- signQuote f.keyPair.privateKey payload
+  offer <- submit seller $ createCmd VerifiedQuoteTradeOffer with
+    seller, buyer = f.reader, feedId = "BTC/USD", quantity = 2.0
+    verifierCid = f.verifierIf
+  settlementCid <- submit (actAs f.reader <> disclose f.disc) $
+    exerciseCmd offer AcceptVerifiedQuoteTrade with payload, signature = sig
+  Some s <- queryContractId f.reader settlementCid
+  s.price       === 65000.0
+  s.totalAmount === 130000.0
+  s.feedId      === "BTC/USD"
+  s.distributor === f.oracle
+
+-- The consumer rejects a verified quote that is for the wrong feed; the standard
+-- authenticates the signer, not the feed.
+testConsumerWrongFeedRejected : Script ()
+testConsumerWrongFeedRejected = do
+  f <- setup
+  seller <- allocateParty "Seller"
+  now <- getTime
+  let payload = defaultPayload now            -- feedId = BTC/USD
+  sig <- signQuote f.keyPair.privateKey payload
+  offer <- submit seller $ createCmd VerifiedQuoteTradeOffer with
+    seller, buyer = f.reader, feedId = "ETH/USD", quantity = 2.0
+    verifierCid = f.verifierIf
+  submitFailsWith f.reader f.disc
+    (exerciseCmd offer AcceptVerifiedQuoteTrade with payload, signature = sig)
+    "feed mismatch"
