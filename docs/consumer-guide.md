@@ -119,6 +119,39 @@ a data point: confirm `quote.feedId` is the feed you expect, and bound the age
 of `publishedAt` for your staleness policy. The standard authenticates the
 `distributor`, not the feed identity.
 
+## Switching providers, and reading several at once
+
+Reading through an interface means your code never names a producer's package.
+What ties you to a particular provider is the data you trust: a
+`(distributor, feedId)` pair. Gate on both inside your workflow, and switching to
+another provider is supplying a different `distributor`. The compiled code does
+not change.
+
+```daml
+v <- exercise quoteCid PublishedQuote_Fetch with actor = buyer
+assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
+assertMsg "feed mismatch" (v.quote.feedId == feedId)
+...  -- settle at v.quote.price
+```
+
+The worked example is
+[`examples/switching-consumer`](../examples/switching-consumer), which reads the
+same feed from two deliberately different providers:
+[`switching-provider-direct`](../examples/switching-provider-direct) stores a
+price, and
+[`switching-provider-marketmaker`](../examples/switching-provider-marketmaker)
+stores a bid and an ask and derives the mid. Both expose the same views, so the
+consumer settles against either with no change. On the generic data point path
+the two providers must also publish the same payload schema; the consumer reads
+the keys it needs and ignores the rest, so the market maker's extra `bid`/`ask`
+fields are harmless.
+
+Because every provider exposes the same view, a consumer can read more than one
+and require them to agree before acting. The `CrossCheckOffer` in that example
+reads two providers in a single transaction and settles only when their prices
+fall within a tolerance, pricing the trade at the average. That is N-of-M
+agreement across distributors, built from the same interface read.
+
 ## Reading a pulled, signed quote
 
 The interfaces above read a quote the producer pushed onto the ledger as a
