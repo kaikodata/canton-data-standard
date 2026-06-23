@@ -14,6 +14,9 @@ data-dependencies:
   - ../examples/datapoint-consumer/.daml/dist/datapoint-consumer-example-0.1.0.dar
   - ../examples/quote-producer/.daml/dist/quote-producer-example-0.1.0.dar
   - ../examples/quote-consumer/.daml/dist/quote-consumer-example-0.1.0.dar
+  - ../examples/switching-provider-direct/.daml/dist/switching-provider-direct-example-0.1.0.dar
+  - ../examples/switching-provider-marketmaker/.daml/dist/switching-provider-marketmaker-example-0.1.0.dar
+  - ../examples/switching-consumer/.daml/dist/switching-consumer-example-0.1.0.dar
 build-options:
   - --ghc-option=-Wunused-binds
   - --ghc-option=-Wunused-matches

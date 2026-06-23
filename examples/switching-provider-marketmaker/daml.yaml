@@ -1,0 +1,15 @@
+sdk-version: 3.4.11
+name: switching-provider-marketmaker-example
+source: daml
+version: 0.1.0
+dependencies:
+  - daml-prim
+  - daml-stdlib
+data-dependencies:
+  - ../../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.0.dar
+  - ../../interfaces/canton-data-standard-datapoint-v1/.daml/dist/canton-data-standard-datapoint-v1-0.1.0.dar
+  - ../../interfaces/canton-data-standard-quote-v1/.daml/dist/canton-data-standard-quote-v1-0.1.0.dar
+build-options:
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches
+  - --target=2.1

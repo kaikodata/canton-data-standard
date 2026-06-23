@@ -1,0 +1,93 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | A reference producer for the provider-switching demonstration: a
+-- structurally different oracle. It stores a bid and an ask rather than a
+-- price, and derives the mid `(bid + ask) / 2` for the views. It implements
+-- the same two interfaces as `SwitchingProviderDirect.Oracle` and exposes the
+-- identical view shape, so a consumer reading through the interface cannot tell
+-- the two providers apart. This proves the consumer is decoupled from how the
+-- data is stored, not only from which party publishes it.
+module SwitchingProviderMarketMaker.Oracle where
+
+import qualified DA.TextMap as TM
+
+import DataStandard.DataPointV1
+import DataStandard.QuoteV1
+import DataStandard.Utils
+
+-- | A published two-sided market for a single feed. The price the views expose
+-- is the mid, computed from the bid and ask rather than stored.
+--
+-- The template deliberately has no observers: a reader that is not a
+-- stakeholder obtains the contract through explicit disclosure and reads it by
+-- exercising an interface's `_Fetch` choice, which keeps the cost of publishing
+-- independent of the size of the audience.
+template MarketMakerQuote
+  with
+    oracle      : Party
+      -- ^ The provider; signs and owns the publication.
+    feedId      : Text
+      -- ^ The feed this market is for in the typed view, for example "BTC/USD".
+    assetPair   : Text
+      -- ^ The same feed under the key the generic payload uses. Held separately
+      -- from `feedId` so the two views can name the feed by their own
+      -- conventions; a provider serving one feed sets them equal.
+    bid         : Decimal
+      -- ^ The price the market maker bids; the lower side of the mid.
+    ask         : Decimal
+      -- ^ The price the market maker asks; the upper side of the mid.
+    priceTime   : Time
+      -- ^ The market time the two-sided market is observed for.
+    publishedAt : Time
+      -- ^ When the market was produced.
+  where
+    signatory oracle
+
+    interface instance PublishedQuote for MarketMakerQuote where
+      view = PublishedQuoteView with
+        distributor = oracle
+        quote = Quote with
+          feedId
+          price = mid bid ask
+          priceTime
+        publishedAt
+        metadata    = Metadata with
+          values = TM.fromList [("examplemarketmaker.com/source", "reference-implementation")]
+
+    interface instance PublishedData for MarketMakerQuote where
+      view = PublishedDataView with
+        distributor   = oracle
+        publishedAt
+        schemaVersion = "1.1.0"
+        values        = insertField "assetPair" assetPair
+                      $ insertField "price"     (mid bid ask)
+                      $ insertField "bid"       bid
+                      $ insertField "ask"       ask
+                        TM.empty
+        metadata      = Metadata with
+          values = TM.fromList [("examplemarketmaker.com/source", "reference-implementation")]
+
+    -- | Publish a fresh market by archiving this contract and creating its
+    -- replacement. Because the old publication is archived, a consumer holding
+    -- its contract id fails fast rather than reading a stale market; revoking a
+    -- feed is the same operation with no replacement created.
+    choice UpdateMarketMakerQuote : ContractId MarketMakerQuote
+      with
+        newBid         : Decimal
+        newAsk         : Decimal
+        newPriceTime   : Time
+        newPublishedAt : Time
+          -- ^ Must be later than the current `publishedAt`.
+      controller oracle
+      do
+        assertMsg "publication time must increase" (newPublishedAt > publishedAt)
+        create this with
+          bid         = newBid
+          ask         = newAsk
+          priceTime   = newPriceTime
+          publishedAt = newPublishedAt
+
+-- | The mid price of a two-sided market: the arithmetic mean of bid and ask.
+mid : Decimal -> Decimal -> Decimal
+mid b a = (b + a) / 2.0

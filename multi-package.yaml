@@ -14,6 +14,9 @@ packages:
 - ./examples/datapoint-consumer
 - ./examples/quote-producer
 - ./examples/quote-consumer
+- ./examples/switching-provider-direct
+- ./examples/switching-provider-marketmaker
+- ./examples/switching-consumer
 - ./examples/verifier-producer
 - ./examples/verifier-consumer
 - ./examples/paid-verifier-producer
