@@ -263,13 +263,14 @@ expiry is what bounds a leaked signature.
 ### Charging per call: the paid verifier
 
 `PaidQuoteVerifier` adds a fee to the same flow. You sign the quote together with
-a `Cost` (a `fee` amount and the `InstrumentId` it is denominated in), so the
-price of the call is covered by your signature and a client cannot be made to
-pay more, or in a different asset, than you quoted. The paid encoding,
-`paidCanonicalText`, reuses the free quote prefix verbatim and appends the cost,
-so it is a distinct codec with its own identifier. It carries the same delimiter
-constraint as the free encoding, on `quote.feedId` and now also the instrument
-`id`: neither may contain `"|"`.
+a `Cost` (a `fee` amount and the `InstrumentId` it is denominated in) and the
+`payee` the fee is paid to, so the price of the call and its recipient are both
+covered by your signature: a client cannot be made to pay more, in a different
+asset, or to a different party than you signed for. The paid encoding,
+`paidCanonicalText`, reuses the free quote prefix verbatim and appends the cost
+and the payee, so it is a distinct codec with its own identifier. It carries the
+same delimiter constraint as the free encoding, on `quote.feedId` and now also the
+instrument `id`: neither may contain `"|"`.
 
 The paid verifier template carries one extra field, the `payee` that the fee is
 credited to:
@@ -297,13 +298,18 @@ template PaidSignatureVerifier
 
 The fee is settled by a single direct Canton Token Standard transfer that the
 calling consumer authorizes alone: the consumer is the sender, and the receiver
-is the `payee` pinned on your verifier, never a party named in the quote. The
-payee can be a treasury distinct from the signing oracle. For the transfer to
-settle in one step the payee needs standing consent to receive, typically a
-transfer preapproval registered with the instrument's registry; the consumer
-threads that consent through the registry-supplied context. If the transfer does
-not complete in one step, the whole verification aborts, so a consumer never
-gets an authenticated quote it has not paid for.
+is the `payee` pinned on your verifier. You sign that same payee into every
+payload, and the verifier settles only when the signed payee matches the one it
+pins. That match is what stops a substitute verifier from redirecting your fee:
+the public key is not a secret, so anyone can publish a verifier that holds it,
+but a payload you signed for your own payee will not settle through a verifier
+pinning a different one. Pin and sign the same party, which can be a treasury
+distinct from the signing oracle. For the transfer to settle in one step the
+payee needs standing consent to receive, typically a transfer preapproval
+registered with the instrument's registry; the consumer threads that consent
+through the registry-supplied context. If the transfer does not complete in one
+step, the whole verification aborts, so a consumer never gets an authenticated
+quote it has not paid for.
 
 The paid verifier depends on the Canton Token Standard interface DARs in
 [`dependencies/`](../dependencies). Reference them from your `daml.yaml` the same

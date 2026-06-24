@@ -17,17 +17,20 @@ import DataStandard.PaidQuoteVerifierV1
 -- the free `SignatureVerifier`. It is the same long-lived, disclosed,
 -- nonconsuming shape, but carries the party the per-call fee is paid to, and
 -- authenticates a quote only once that fee has settled. The payee is pinned here
--- so a payload can never redirect payment; it may be a treasury the producer
--- settles to rather than the signing oracle itself.
+-- and the producer signs the same payee into every payload; the verifier settles
+-- only when the two match, so a substitute verifier holding the producer's public
+-- key cannot redirect payment. It may be a treasury the producer settles to
+-- rather than the signing oracle itself.
 template PaidSignatureVerifier
   with
     oracle : Party
       -- ^ The producer; signs and owns the verifier, and is the distributor of
       -- every quote it authenticates.
     payee : Party
-      -- ^ The party credited the per-call fee. Pinned on the contract, so it is
-      -- fixed by the verifier a consumer chose to trust. May be a treasury
-      -- distinct from `oracle`.
+      -- ^ The party credited the per-call fee. Pinned on the contract and signed
+      -- into every payload by the producer; the verifier settles only when the
+      -- pinned payee matches the signed one, so payment cannot be redirected. May
+      -- be a treasury distinct from `oracle`.
     publicKey : Text
       -- ^ The producer's hex DER secp256k1 public key. Rotating it is archiving
       -- this contract and publishing a replacement with the new key.

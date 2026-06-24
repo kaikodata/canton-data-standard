@@ -12,11 +12,17 @@
 --
 -- The fee is moved by a single direct Canton Token Standard transfer the caller
 -- authorizes alone: the caller is the transfer's sender, and the recipient is
--- the verifier's pinned `payee`, never a party named in the payload. The payee
--- may be a treasury distinct from the signing oracle. Settlement must complete
--- in one step; a transfer left pending or failed aborts the whole verification,
--- so a consumer never receives a verified quote it has not paid for, and never
--- pays for a quote that does not verify.
+-- the verifier's pinned `payee`. The payee is also signed into the payload, and
+-- `PaidQuoteVerifier_VerifyAndPay` rejects the call unless the signed payee
+-- equals the verifier's pinned one. That binding is what stops a substitute
+-- verifier carrying the producer's public key but a different payee from
+-- replaying a genuine signature to redirect the fee to itself: the producer's
+-- key is public, so anyone can stand up such a verifier, but only a payload the
+-- producer signed for this payee settles through it. The payee may be a treasury
+-- distinct from the signing oracle. Settlement must complete in one step; a
+-- transfer left pending or failed aborts the whole verification, so a consumer
+-- never receives a verified quote it has not paid for, and never pays for a quote
+-- that does not verify.
 module DataStandard.PaidQuoteVerifierV1 where
 
 import DataStandard.QuoteVerifierV1 (SignedPayload(..), VerifiedPayload(..), canonicalQuoteText)
@@ -89,6 +95,14 @@ data PaidSignedPayload = PaidSignedPayload with
       -- ^ The price of verifying this payload. Signed by the producer, so it
       -- cannot be tampered with; the fee actually settled is taken from here, not
       -- from the caller.
+    payee : Party
+      -- ^ The recipient the producer commits the fee to. Signed into the payload,
+      -- so it cannot be altered after signing. `PaidQuoteVerifier_VerifyAndPay`
+      -- requires it to equal the verifier's pinned `payee` and aborts otherwise,
+      -- which is what stops a substitute verifier holding the producer's public
+      -- key from redirecting the fee: a genuine signature replayed through a
+      -- verifier with a different payee fails the cross-check. The producer sets
+      -- it to the same treasury it pins on the verifier it publishes.
     quote : Quote
       -- ^ The economic content: the feed, its price, and the market instant the
       -- price is observed for. Identical in meaning to the free verifier's quote.
@@ -106,8 +120,11 @@ data PaidQuoteVerifierView = PaidQuoteVerifierView with
       -- every `VerifiedPayload`. Need not be the party paid the fee.
     payee : Party
       -- ^ The fee recipient, pinned on the verifier. The settling transfer always
-      -- credits this party and never one named in the payload, so a payload
-      -- cannot redirect payment. MAY be a treasury distinct from `oracle`.
+      -- credits this party. `PaidQuoteVerifier_VerifyAndPay` also requires it to
+      -- equal the payee the producer signed into the payload, so a substitute
+      -- verifier holding the producer's public key but a different payee cannot
+      -- redirect payment by replaying a genuine signature. MAY be a treasury
+      -- distinct from `oracle`.
     publicKey : Text
       -- ^ The producer's secp256k1 public key, hex-encoded in DER form, against
       -- which `PaidQuoteVerifier_VerifyAndPay` checks every signature. Resident on the contract
@@ -127,8 +144,9 @@ data PaidQuoteVerifierView = PaidQuoteVerifierView with
 
 -- | The identifier of the canonical encoding `PaidQuoteVerifier_VerifyAndPay` reproduces and
 -- checks the signature over. It extends the free verifier's "v1-quote-concat"
--- with the cost, so it is a distinct codec with its own identifier; a producer's
--- off-ledger signer must encode paid payloads with the matching algorithm.
+-- with the cost and the fee payee, so it is a distinct codec with its own
+-- identifier; a producer's off-ledger signer must encode paid payloads with the
+-- matching algorithm, including the payee.
 paidQuoteCodecId : Text
 paidQuoteCodecId = "v1-paid-quote-concat"
 
@@ -146,18 +164,30 @@ canonicalCostText c =
   <> partyToText c.instrument.admin <> "|"
   <> c.instrument.id       <> "|"
 
+-- | The canonical rendering of the fee payee: the party via `partyToText`,
+-- followed by a "|" delimiter, mirroring how `canonicalCostText` renders the
+-- instrument admin. `partyToText` makes the encoding stable across participants.
+-- A party id contains no "|", so this field is injective and needs no caveat of
+-- its own.
+canonicalPayeeText : Party -> Text
+canonicalPayeeText payee = partyToText payee <> "|"
+
 -- | The canonical text of a paid payload under the "v1-paid-quote-concat"
 -- encoding: the free verifier's `canonicalQuoteText` over the quote and validity
--- window, followed by `canonicalCostText` over the cost. The free prefix is
--- reused verbatim so the two codecs share a byte-for-byte definition of the
--- quote fields and only the cost suffix is new. Its injectivity carries the same
--- conditions as its parts: `quote.feedId` and the instrument `id` must contain no
--- "|". The signature is computed over this text; `PaidQuoteVerifier_VerifyAndPay` rebuilds it and
--- checks the signature against it.
+-- window, followed by `canonicalCostText` over the cost, then `canonicalPayeeText`
+-- over the fee payee. The free prefix is reused verbatim so the two codecs share
+-- a byte-for-byte definition of the quote fields and only the cost-and-payee
+-- suffix is new. Binding the payee here is what lets `PaidQuoteVerifier_VerifyAndPay`
+-- detect a substitute verifier: a signature commits to a single payee, so it does
+-- not verify a payload presented to a verifier pinning a different one. Its
+-- injectivity carries the same conditions as its parts: `quote.feedId` and the
+-- instrument `id` must contain no "|". The signature is computed over this text;
+-- `PaidQuoteVerifier_VerifyAndPay` rebuilds it and checks the signature against it.
 paidCanonicalText : PaidSignedPayload -> Text
 paidCanonicalText p =
      canonicalQuoteText (toQuotePayload p)
   <> canonicalCostText p.cost
+  <> canonicalPayeeText p.payee
 
 -- | Project a paid payload onto the free verifier's quote-and-window payload so
 -- the shared canonical prefix is produced by the free verifier's encoder rather
@@ -201,9 +231,14 @@ interface PaidQuoteVerifier where
   -- aborting deterministically at the first failure: it checks the payload has
   -- not expired (the sole replay defence), checks the signature is valid under
   -- the verifier's resident public key over the canonical text including the
-  -- cost, rejects a non-positive `cost.fee`, then settles the fee with a single
-  -- direct transfer from `actor` to the verifier's pinned `payee` and requires
+  -- cost and the payee, requires the payee the producer signed to equal the
+  -- verifier's pinned `payee`, rejects a non-positive `cost.fee`, then settles
+  -- the fee with a single direct transfer from `actor` to that payee and requires
   -- that transfer to complete in one step.
+  -- The signature now authenticates the payee, and the payee cross-check then
+  -- rejects any verifier pinning a payee the producer did not sign for, so a
+  -- substitute verifier carrying the producer's public key cannot replay a
+  -- genuine signature to redirect the fee to itself.
   -- A pending or failed settlement aborts the verification. Confirming the quote
   -- is for an expected feed is the consumer's responsibility: the standard
   -- authenticates the signer, not the feed.
@@ -230,6 +265,7 @@ interface PaidQuoteVerifier where
       assertMsg "payload expired" (now <= payload.expiresAt)
       let v = view this
       assertMsg "invalid signature" (paidSignatureValid v.publicKey payload signature)
+      assertMsg "payee mismatch" (v.payee == payload.payee)
       assertMsg "cost fee must be positive" (payload.cost.fee > 0.0)
       let transfer = Transfer with
             sender = actor
