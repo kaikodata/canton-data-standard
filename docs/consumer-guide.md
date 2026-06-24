@@ -217,9 +217,9 @@ standard provides, so for a tighter staleness policy bound the age of
 ## Reading a pulled quote and paying for it
 
 `PaidQuoteVerifier` is the same flow with a fee attached. You reconstruct a
-`PaidSignedPayload`, which is the free payload plus the `Cost` the producer
-signed, and you supply `PaymentArgs`: the Canton Token Standard transfer factory
-for the fee instrument, the holdings to pay from, and the registry-supplied
+`PaidSignedPayload`, which is the free payload plus the `Cost` and the `payee` the
+producer signed, and you supply `PaymentArgs`: the Canton Token Standard transfer
+factory for the fee instrument, the holdings to pay from, and the registry-supplied
 context. You hand all of it to `PaidQuoteVerifier_VerifyAndPay`:
 
 ```daml
@@ -245,12 +245,14 @@ settles into the same `VerifiedQuoteTradeSettlement` record the free
 
 `PaidQuoteVerifier_VerifyAndPay` authenticates the payload and settles the fee atomically. The fee
 amount and the asset come from the `Cost` the producer signed, not from your
-arguments, and the recipient is the `payee` pinned on the verifier, not a party
-in the payload, so you cannot be charged more than quoted and the payment cannot
-be redirected. The transfer is a single direct Canton Token Standard transfer
-you authorize as the sender; if it does not settle in one step the whole
-verification aborts, so you never receive a verified quote you have not paid for,
-and never pay for one that does not verify.
+arguments, and the recipient is the `payee` pinned on the verifier. The producer
+also signs that payee into the payload, and the call settles only when the two
+match, so you cannot be charged more than quoted and the fee cannot be redirected,
+not even through a substitute verifier that holds the producer's public key. The
+transfer is a single direct Canton Token Standard transfer you authorize as the
+sender; if it does not settle in one step the whole verification aborts, so you
+never receive a verified quote you have not paid for, and never pay for one that
+does not verify.
 
 Two things you supply are worth calling out. The `inputHoldingCids` are your own
 holdings of the fee instrument; naming specific ones lets you use deliberate

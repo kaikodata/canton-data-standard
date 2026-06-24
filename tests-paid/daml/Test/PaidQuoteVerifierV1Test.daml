@@ -90,7 +90,8 @@ setup = do
     preapprovalCid, preapprovalDisc
 
 -- | A standard, valid paid payload: BTC/USD @ 65000, a 5 USD fee on the
--- fixture's instrument, published now, expiring in 1h.
+-- fixture's instrument, the fee committed to the fixture treasury (the payee the
+-- verifier pins), published now, expiring in 1h.
 defaultPayload : PaidFixture -> Time -> PaidSignedPayload
 defaultPayload f now = PaidSignedPayload with
   publishedAt = now
@@ -98,6 +99,7 @@ defaultPayload f now = PaidSignedPayload with
   cost = Cost with
     fee = defaultFee
     instrument = f.instrumentId
+  payee = f.treasury
   quote = Quote with
     feedId    = "BTC/USD"
     price     = 65000.0
@@ -196,6 +198,27 @@ testSignatureNotCoveringCostRejected = do
         actor = f.buyer, payload, signature = wrongSig, payment = paymentArgs f )
     "invalid signature"
 
+-- A signature does not cover a different payee: signing a payload that names one
+-- payee and presenting it with another yields a signature that fails to verify,
+-- proving the payee is part of the signed canonical text. This is the companion to
+-- testRogueVerifierCannotRedirectFee: that test proves the pinned payee is
+-- cross-checked against the signed one, and this proves the signed payee itself
+-- cannot be forged to match a substitute verifier.
+testSignatureNotCoveringPayeeRejected : Script ()
+testSignatureNotCoveringPayeeRejected = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload f now
+      otherPayee = payload with payee = f.buyer
+  -- Sign a payload naming a different payee, present the real one (payee =
+  -- treasury): the signature is valid DER but does not match the presented
+  -- canonical text, which now binds the payee.
+  wrongSig <- signPaid f.keyPair.privateKey otherPayee
+  submitFailsWith f.buyer f.verifierDisc
+    ( exerciseCmd f.verifierIf PaidQuoteVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = wrongSig, payment = paymentArgs f )
+    "invalid signature"
+
 -- A non-positive signed fee is rejected before any settlement. The fee is signed
 -- (so the signature check passes), proving `PaidQuoteVerifier_VerifyAndPay` enforces the positive-fee
 -- invariant itself rather than leaving it to the registry's amount check.
@@ -279,6 +302,65 @@ testConsumerPaidWorkflowHappyPath = do
 
   treasuryHoldings <- query @RegistryHolding f.treasury
   assertMsg "the treasury was paid the fee" (length treasuryHoldings == 1)
+
+-- A substitute verifier cannot redirect the fee. The producer's public key is
+-- public, so an attacker can deploy their own `PaidQuoteVerifier` holding that
+-- key but pinning themselves as payee, then replay a genuine oracle-signed
+-- payload through it. The payload's payee is signed (here the fixture treasury),
+-- so the signature still verifies against the real key, but the verifier pins a
+-- different payee, and `PaidQuoteVerifier_VerifyAndPay` aborts on the payee
+-- cross-check rather than settling the fee to the attacker. The abort is
+-- specifically "payee mismatch", not a signature error, which is what proves the
+-- payee binding (not an incidental mismatch) is the control that blocks the
+-- redirect.
+testRogueVerifierCannotRedirectFee : Script ()
+testRogueVerifierCannotRedirectFee = do
+  f <- setup
+  attacker <- allocateParty "Attacker"
+
+  -- The attacker deploys their own verifier: the real oracle key, themselves as
+  -- payee. They are its signatory, so they can exercise it without disclosure.
+  rogueTpl <- submit attacker $ createCmd PaidSignatureVerifier with
+    oracle = attacker, payee = attacker, publicKey = f.keyPair.publicKey
+  let rogueIf = toInterfaceContractId @PaidQuoteVerifier rogueTpl
+
+  -- Fund the attacker and let them preapprove receiving the fee to themselves,
+  -- so only the payee cross-check (not a missing holding or preapproval) can
+  -- stop the redirect.
+  attackerHoldingCid <- submit f.admin $ createCmd RegistryHolding with
+    admin = f.admin, owner = attacker, instrumentId = f.instrumentId, amount = 100.0
+  attackerPreapprovalCid <- submit attacker $ createCmd TransferPreapproval with
+    admin = f.admin, receiver = attacker, instrumentId = f.instrumentId
+  Some attackerPreapprovalDisc <- queryDisclosure attacker attackerPreapprovalCid
+
+  -- A genuine oracle-signed payload, committed to the fixture treasury.
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+  let attackerPayment = PaymentArgs with
+        transferFactoryCid = f.factoryCid
+        inputHoldingCids = [toInterfaceContractId @Holding attackerHoldingCid]
+        context = ExtraArgs with
+          context = ChoiceContext with
+            values = TM.fromList
+              [ (preapprovalContextKey, AV_ContractId (coerceContractId attackerPreapprovalCid)) ]
+          meta = emptyMetadata
+
+  expectAbort
+    ( trySubmit
+        ( actAs attacker
+            <> disclose f.factoryDisc
+            <> disclose attackerPreapprovalDisc
+        )
+        ( exerciseCmd rogueIf PaidQuoteVerifier_VerifyAndPay with
+            actor = attacker, payload, signature = sig, payment = attackerPayment )
+    )
+    "payee mismatch"
+
+  -- Nothing settled: the attacker was credited no fee.
+  attackerHoldings <- query @RegistryHolding attacker
+  assertMsg "no fee was redirected to the attacker"
+    (all (\(_, h) -> h.amount /= defaultFee || h.owner /= attacker) attackerHoldings)
 
 -- | As `submitFailsWith`, attaching the verifier, factory, and preapproval
 -- disclosures the buyer needs to reach the full settlement path.
