@@ -14,6 +14,8 @@ module PaidVerifierConsumer.Trading where
 import DataStandard.PaidQuoteVerifierV1
 import VerifierConsumer.Trading (VerifiedQuoteTradeSettlement(..))
 
+import DA.Time (RelTime, subTime)
+
 -- | The paid sibling of `VerifiedQuoteTradeOffer`: an offer settled at the price
 -- of a quote authenticated through a `PaidQuoteVerifier`, where accepting also
 -- pays the producer's per-call verification fee in the same transaction. The fee
@@ -33,6 +35,17 @@ template PaidVerifiedQuoteTradeOffer
       -- feed.
     quantity : Decimal
       -- ^ The amount of the feed's instrument to settle.
+    expectedDistributor : Party
+      -- ^ The one distributor whose price the buyer accepts. The standard makes
+      -- the verified `distributor` authentic, but trusting that party is the
+      -- consumer's decision, so the buyer pins it here and the accept gates on
+      -- it. The price source stays the counterparty's choice through the
+      -- referenced verifier; this only fixes which producer behind that verifier
+      -- the buyer is willing to settle on.
+    maxQuoteAge : RelTime
+      -- ^ The largest age, now minus `publishedAt`, the buyer will settle on. The
+      -- signed `expiresAt` is the standard's only replay bound; this is the
+      -- consumer's own tighter staleness policy, applied on top of it.
     verifierCid : ContractId PaidQuoteVerifier
       -- ^ Any `PaidQuoteVerifier`, identified through the interface rather than a
       -- concrete template. The buyer obtains it through explicit disclosure when
@@ -46,8 +59,11 @@ template PaidVerifiedQuoteTradeOffer
     -- the payload and settles the fee atomically; a wrong feed, an expired
     -- payload, a bad signature, or a fee that does not settle in one step aborts
     -- the whole transaction, so no trade is recorded and no fee is paid unless
-    -- the quote both verifies and is paid for. A production consumer would also
-    -- bound the age of `publishedAt`.
+    -- the quote both verifies and is paid for. The buyer also gates the verified
+    -- `distributor` against `expectedDistributor` and bounds the age of
+    -- `publishedAt` by `maxQuoteAge`, so an untrusted producer or a quote older
+    -- than the buyer's policy aborts before settlement, and before any fee
+    -- settles.
     choice AcceptPaidVerifiedQuoteTrade : ContractId VerifiedQuoteTradeSettlement
       with
         payload : PaidSignedPayload
@@ -59,9 +75,12 @@ template PaidVerifiedQuoteTradeOffer
           -- verification fee with.
       controller buyer
       do
+        now <- getTime
         v <- exercise verifierCid PaidQuoteVerifier_VerifyAndPay with
           actor = buyer, payload, signature, payment
         assertMsg "feed mismatch" (v.quote.feedId == feedId)
+        assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
+        assertMsg "quote too stale" (subTime now v.publishedAt <= maxQuoteAge)
         create VerifiedQuoteTradeSettlement with
           seller, buyer, feedId, quantity
           price       = v.quote.price

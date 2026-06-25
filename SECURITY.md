@@ -18,8 +18,7 @@ checked on-ledger:
   mismatch between an off-ledger signer and the on-ledger check is a correctness
   and trust issue,
 - the replay window (`expiresAt`) and the contract-resident public key, and
-- the paid path's settlement, where the fee must be neither redirectable nor
-  skippable.
+- the paid path's settlement, where the fee must not be redirectable.
 
 The reference producers, consumers, and the test token registry are
 illustrative, not production code. The registry in particular is a deliberately

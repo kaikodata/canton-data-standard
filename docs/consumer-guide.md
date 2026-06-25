@@ -78,12 +78,20 @@ once refreshed.
 
 ## Checks that are yours, not the standard's
 
-The standard authenticates who published: the `distributor` signed the
-contract. Everything else is your workflow's policy.
+The standard authenticates who published: `distributor` is the party that
+signed the contract, and it cannot be forged. Whether that party is one you
+trust for this feed is still your decision, as is everything else about how you
+use the data.
 
+- Distributor identity: confirm `distributor` is a party you trust
+  (`distributor == expectedDistributor`). The standard guarantees the field is
+  authentic, not that you want data from whoever signed it, and the price
+  source is often chosen by your counterparty rather than by you.
 - Feed identity: verify the payload describes the feed you expect (the
   `assetPair` check above).
-- Staleness: bound the age of `publishedAt` for your use case.
+- Staleness: bound the age of `publishedAt` for your use case. The reference
+  consumers enforce this with a `maxQuoteAge` gate rather than leaving it to
+  prose.
 - Schema: handle `None` from `lookupField`, since a field may be absent or
   typed differently than you expect. Gate on `schemaVersion` if you support
   multiple producer schemas.
@@ -115,9 +123,10 @@ The full version lives in
 
 `quote.price` is a typed `Decimal` you read directly, with no `lookupField` and
 no `schemaVersion` to gate on. The checks that remain yours are the same as for
-a data point: confirm `quote.feedId` is the feed you expect, and bound the age
-of `publishedAt` for your staleness policy. The standard authenticates the
-`distributor`, not the feed identity.
+a data point: confirm `quote.feedId` is the feed you expect, confirm
+`distributor` is a party you trust, and bound the age of `publishedAt` for your
+staleness policy. The standard makes `distributor` authentic; it does not decide
+whether you trust that party or whether the feed is the one you want.
 
 ## Switching providers, and reading several at once
 
@@ -210,7 +219,8 @@ can be reproduced off-ledger later.
 
 The checks that remain yours are the same as before. The standard authenticates
 the signer, not the feed, so confirm `quote.feedId` is the feed you expect (the
-feed-mismatch check above). The `expiresAt` window is the only replay defence the
+feed-mismatch check above) and confirm `distributor` is a party you trust before
+settling against its price. The `expiresAt` window is the only replay defence the
 standard provides, so for a tighter staleness policy bound the age of
 `publishedAt` yourself.
 
@@ -250,9 +260,8 @@ also signs that payee into the payload, and the call settles only when the two
 match, so you cannot be charged more than quoted and the fee cannot be redirected,
 not even through a substitute verifier that holds the producer's public key. The
 transfer is a single direct Canton Token Standard transfer you authorize as the
-sender; if it does not settle in one step the whole verification aborts, so you
-never receive a verified quote you have not paid for, and never pay for one that
-does not verify.
+sender, and the verification and the payment abort together, so you never pay for
+a quote that does not verify.
 
 Two things you supply are worth calling out. The `inputHoldingCids` are your own
 holdings of the fee instrument; naming specific ones lets you use deliberate

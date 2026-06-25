@@ -307,9 +307,13 @@ pinning a different one. Pin and sign the same party, which can be a treasury
 distinct from the signing oracle. For the transfer to settle in one step the
 payee needs standing consent to receive, typically a transfer preapproval
 registered with the instrument's registry; the consumer threads that consent
-through the registry-supplied context. If the transfer does not complete in one
-step, the whole verification aborts, so a consumer never gets an authenticated
-quote it has not paid for.
+through the registry-supplied context. If the transfer does not report completion in one
+step, the whole verification aborts. The factory that moves the fee is supplied
+by the consumer, so the standard cannot prove on-ledger that the fee genuinely
+moved: a consumer set on skipping the fee is resisted by the deployment vetting
+only honest Token Standard implementations, the trust the Token Standard itself
+places in its factory. Redirection, by contrast, is prevented on-ledger by the
+payee binding.
 
 The paid verifier depends on the Canton Token Standard interface DARs in
 [`dependencies/`](../dependencies). Reference them from your `daml.yaml` the same
