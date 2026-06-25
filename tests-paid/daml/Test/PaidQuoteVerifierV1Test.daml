@@ -23,7 +23,12 @@ import DataStandard.Utils (Quote(..))
 
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId(..))
 import Splice.Api.Token.MetadataV1
-import Splice.Api.Token.TransferInstructionV1 (TransferFactory)
+import Splice.Api.Token.TransferInstructionV1
+  ( TransferFactory
+  , TransferFactoryView(..)
+  , TransferInstructionResult(..)
+  , TransferInstructionResult_Output(..)
+  )
 import TestTokenRegistry.Registry
 import PaidVerifierProducer.SignatureVerifier
 import PaidVerifierConsumer.Trading
@@ -285,6 +290,7 @@ testConsumerPaidWorkflowHappyPath = do
   sig <- signPaid f.keyPair.privateKey payload
   offer <- submit seller $ createCmd PaidVerifiedQuoteTradeOffer with
     seller, buyer = f.buyer, feedId = "BTC/USD", quantity = 2.0
+    expectedDistributor = f.oracle, maxQuoteAge = hours 24
     verifierCid = f.verifierIf
   settlementCid <- submit
     ( actAs f.buyer
@@ -302,6 +308,72 @@ testConsumerPaidWorkflowHappyPath = do
 
   treasuryHoldings <- query @RegistryHolding f.treasury
   assertMsg "the treasury was paid the fee" (length treasuryHoldings == 1)
+
+-- The paid consumer rejects a verified quote from a distributor other than the
+-- one the offer pins. The payload verifies and the fee would settle, but the
+-- consumer's distributor gate aborts the whole transaction, so nothing settles.
+testPaidConsumerUntrustedDistributorRejected : Script ()
+testPaidConsumerUntrustedDistributorRejected = do
+  f <- setup
+  seller <- allocateParty "Seller"
+  other  <- allocateParty "OtherOracle"
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+  offer <- submit seller $ createCmd PaidVerifiedQuoteTradeOffer with
+    seller, buyer = f.buyer, feedId = "BTC/USD", quantity = 2.0
+    expectedDistributor = other, maxQuoteAge = hours 24
+    verifierCid = f.verifierIf
+  submitFailsWithDiscs f
+    ( exerciseCmd offer AcceptPaidVerifiedQuoteTrade with
+        payload, signature = sig, payment = paymentArgs f )
+    "untrusted distributor"
+
+  -- The whole transaction rolled back, so the treasury was paid nothing.
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  assertMsg "no fee settled when the distributor is untrusted" (null treasuryHoldings)
+
+-- The paid consumer rejects a verified quote older than its staleness bound. The
+-- payload was produced two hours ago but still has a live window, so it verifies;
+-- the consumer's `maxQuoteAge` of one hour rejects it and the fee rolls back.
+testPaidConsumerStaleQuoteRejected : Script ()
+testPaidConsumerStaleQuoteRejected = do
+  f <- setup
+  seller <- allocateParty "Seller"
+  now <- getTime
+  let payload = (defaultPayload f now) with publishedAt = addRelTime now (hours (-2))
+  sig <- signPaid f.keyPair.privateKey payload
+  offer <- submit seller $ createCmd PaidVerifiedQuoteTradeOffer with
+    seller, buyer = f.buyer, feedId = "BTC/USD", quantity = 2.0
+    expectedDistributor = f.oracle, maxQuoteAge = hours 1
+    verifierCid = f.verifierIf
+  submitFailsWithDiscs f
+    ( exerciseCmd offer AcceptPaidVerifiedQuoteTrade with
+        payload, signature = sig, payment = paymentArgs f )
+    "quote too stale"
+
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  assertMsg "no fee settled when the quote is stale" (null treasuryHoldings)
+
+-- A paid payload signed with `publishedAt` after `expiresAt` is rejected by the
+-- verifier on the well-formedness check, before the expiry check and before any
+-- fee is attempted. The window ends before it begins, so it could never be live.
+testPaidPublishedAfterExpiryRejected : Script ()
+testPaidPublishedAfterExpiryRejected = do
+  f <- setup
+  now <- getTime
+  let payload = (defaultPayload f now) with
+        publishedAt = addRelTime now (hours 2)
+        expiresAt   = addRelTime now (hours 1)
+  sig <- signPaid f.keyPair.privateKey payload
+  submitFailsWithDiscs f
+    ( exerciseCmd f.verifierIf PaidQuoteVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = sig, payment = paymentArgs f )
+    "published after expiry"
+
+  -- Nothing settled: the ill-formed payload aborted before the fee.
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  assertMsg "no fee settled for an ill-formed window" (null treasuryHoldings)
 
 -- A substitute verifier cannot redirect the fee. The producer's public key is
 -- public, so an attacker can deploy their own `PaidQuoteVerifier` holding that
@@ -361,6 +433,50 @@ testRogueVerifierCannotRedirectFee = do
   attackerHoldings <- query @RegistryHolding attacker
   assertMsg "no fee was redirected to the attacker"
     (all (\(_, h) -> h.amount /= defaultFee || h.owner /= attacker) attackerHoldings)
+
+-- | A counterfeit transfer factory that models the headline issue-#2 attack: it
+-- reports a completed transfer while moving nothing, crediting no receiver
+-- holdings.
+template NoOpTransferFactory
+  with
+    operator : Party
+  where
+    signatory operator
+
+    interface instance TransferFactory for NoOpTransferFactory where
+      view = TransferFactoryView with admin = operator, meta = emptyMetadata
+      transferFactory_transferImpl _self _arg =
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with receiverHoldingCids = []
+          senderChangeCids = []
+          meta = emptyMetadata
+      transferFactory_publicFetchImpl _self _arg =
+        pure TransferFactoryView with admin = operator, meta = emptyMetadata
+
+-- A factory that reports completion while crediting no holdings cannot be used to
+-- skip the fee. The buyer presents a genuine oracle-signed payload to the genuine
+-- verifier but points the payment at a no-op factory it controls, which returns a
+-- `Completed` result with an empty receiver-holding set. The choice rejects the
+-- settlement on the non-empty-holdings check rather than returning a verified
+-- quote, so a quote is never delivered against a transfer that moved nothing. The
+-- abort is specifically "fee settlement produced no receiver holdings", proving
+-- that check (not an incidental error) is what blocks the skip.
+testNoOpTransferFactorySkipRejected : Script ()
+testNoOpTransferFactorySkipRejected = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+
+  -- The buyer stands up a counterfeit factory it signs, then settles through it.
+  noOpFactoryTplCid <- submit f.buyer $ createCmd NoOpTransferFactory with operator = f.buyer
+  let noOpFactoryCid = toInterfaceContractId @TransferFactory noOpFactoryTplCid
+      skipPayment = (paymentArgs f) with transferFactoryCid = noOpFactoryCid
+
+  submitFailsWith f.buyer f.verifierDisc
+    ( exerciseCmd f.verifierIf PaidQuoteVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = sig, payment = skipPayment )
+    "fee settlement produced no receiver holdings"
 
 -- | As `submitFailsWith`, attaching the verifier, factory, and preapproval
 -- disclosures the buyer needs to reach the full settlement path.

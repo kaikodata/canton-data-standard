@@ -7,7 +7,7 @@ module Test.ExamplesTest where
 
 import DA.Assert ((===))
 import DA.Optional (isNone)
-import DA.Time (addRelTime, minutes)
+import DA.Time (addRelTime, hours, minutes)
 import Daml.Script
 
 import DataConsumer.Trading
@@ -29,6 +29,7 @@ testConsumerTradesOffProducersPrice = do
     oracle, assetPair = "BTC/USD", price = 65000.0, at = now
   offerCid <- submit seller $ createCmd TradeOffer with
     seller, buyer, assetPair = "BTC/USD", quantity = 0.5
+    expectedDistributor = oracle, maxQuoteAge = hours 24
     priceDataCid = toInterfaceContractId @PublishedData priceCid
   Some disc <- queryDisclosure oracle priceCid
   settlementCid <- submit (actAs buyer <> disclose disc) $
@@ -48,6 +49,7 @@ testConsumerRejectsWrongAssetPair = do
     oracle, assetPair = "ETH/USD", price = 3200.0, at = now
   offerCid <- submit seller $ createCmd TradeOffer with
     seller, buyer, assetPair = "BTC/USD", quantity = 0.5
+    expectedDistributor = oracle, maxQuoteAge = hours 24
     priceDataCid = toInterfaceContractId @PublishedData priceCid
   Some disc <- queryDisclosure oracle priceCid
   submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade) "asset pair mismatch"
@@ -75,6 +77,7 @@ testConsumerRejectsForeignSchema = do
     meta = emptyMetadata
   offerCid <- submit seller $ createCmd TradeOffer with
     seller, buyer, assetPair = "BTC/USD", quantity = 0.5
+    expectedDistributor = oracle, maxQuoteAge = hours 24
     priceDataCid = toInterfaceContractId @PublishedData feedCid
   Some disc <- queryDisclosure oracle feedCid
   submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade)
@@ -106,6 +109,7 @@ testAcceptFailsAfterPriceRefresh = do
     oracle, assetPair = "BTC/USD", price = 65000.0, at = now
   offerCid <- submit seller $ createCmd TradeOffer with
     seller, buyer, assetPair = "BTC/USD", quantity = 0.5
+    expectedDistributor = oracle, maxQuoteAge = hours 24
     priceDataCid = toInterfaceContractId @PublishedData priceCid
   Some disc <- queryDisclosure oracle priceCid
   _ <- submit oracle $ exerciseCmd priceCid UpdatePrice with
@@ -124,6 +128,7 @@ testConsumerTradesOffProducersQuote = do
     oracle, feedId = "BTC/USD", price = 65000.0, priceTime = observedAt, publishedAt = now
   offerCid <- submit seller $ createCmd QuoteTradeOffer with
     seller, buyer, feedId = "BTC/USD", quantity = 0.5
+    expectedDistributor = oracle, maxQuoteAge = hours 24
     quoteCid = toInterfaceContractId @PublishedQuote quoteCid
   Some disc <- queryDisclosure oracle quoteCid
   settlementCid <- submit (actAs buyer <> disclose disc) $
@@ -145,6 +150,7 @@ testQuoteConsumerRejectsWrongFeed = do
     oracle, feedId = "ETH/USD", price = 3200.0, priceTime = now, publishedAt = now
   offerCid <- submit seller $ createCmd QuoteTradeOffer with
     seller, buyer, feedId = "BTC/USD", quantity = 0.5
+    expectedDistributor = oracle, maxQuoteAge = hours 24
     quoteCid = toInterfaceContractId @PublishedQuote quoteCid
   Some disc <- queryDisclosure oracle quoteCid
   submitFailsWith buyer disc (exerciseCmd offerCid AcceptQuoteTrade) "feed mismatch"
@@ -190,6 +196,7 @@ testQuoteAcceptFailsAfterRefresh = do
     oracle, feedId = "BTC/USD", price = 65000.0, priceTime = now, publishedAt = now
   offerCid <- submit seller $ createCmd QuoteTradeOffer with
     seller, buyer, feedId = "BTC/USD", quantity = 0.5
+    expectedDistributor = oracle, maxQuoteAge = hours 24
     quoteCid = toInterfaceContractId @PublishedQuote quoteCid
   Some disc <- queryDisclosure oracle quoteCid
   let later = addRelTime now (minutes 1)
@@ -197,3 +204,77 @@ testQuoteAcceptFailsAfterRefresh = do
     newPrice = 66000.0, newPriceTime = later, newPublishedAt = later
   submitFailsMatching buyer disc (exerciseCmd offerCid AcceptQuoteTrade)
     isContractNotFound "the refreshed quote's old contract id is gone"
+
+-- The data-point consumer rejects a publication from a distributor other than
+-- the one the offer pins: the standard makes `distributor` authentic, trusting
+-- it is the consumer's gate.
+testDataConsumerRejectsUntrustedDistributor : Script ()
+testDataConsumerRejectsUntrustedDistributor = do
+  oracle  <- allocateParty "ExampleOracle"
+  other   <- allocateParty "OtherOracle"
+  seller  <- allocateParty "Seller"
+  buyer   <- allocateParty "Buyer"
+  now     <- getTime
+  priceCid <- submit oracle $ createCmd PublishedPrice with
+    oracle, assetPair = "BTC/USD", price = 65000.0, at = now
+  offerCid <- submit seller $ createCmd TradeOffer with
+    seller, buyer, assetPair = "BTC/USD", quantity = 0.5
+    expectedDistributor = other, maxQuoteAge = hours 24
+    priceDataCid = toInterfaceContractId @PublishedData priceCid
+  Some disc <- queryDisclosure oracle priceCid
+  submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade) "untrusted distributor"
+
+-- The data-point consumer rejects a publication older than its staleness bound:
+-- the price is two hours old and the offer admits at most one hour.
+testDataConsumerRejectsStaleData : Script ()
+testDataConsumerRejectsStaleData = do
+  oracle  <- allocateParty "ExampleOracle"
+  seller  <- allocateParty "Seller"
+  buyer   <- allocateParty "Buyer"
+  now     <- getTime
+  priceCid <- submit oracle $ createCmd PublishedPrice with
+    oracle, assetPair = "BTC/USD", price = 65000.0
+    at = addRelTime now (hours (-2))
+  offerCid <- submit seller $ createCmd TradeOffer with
+    seller, buyer, assetPair = "BTC/USD", quantity = 0.5
+    expectedDistributor = oracle, maxQuoteAge = hours 1
+    priceDataCid = toInterfaceContractId @PublishedData priceCid
+  Some disc <- queryDisclosure oracle priceCid
+  submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade) "data too stale"
+
+-- The quote consumer rejects a quote from a distributor other than the one the
+-- offer pins, the same distributor gate as the data-point consumer.
+testQuoteConsumerRejectsUntrustedDistributor : Script ()
+testQuoteConsumerRejectsUntrustedDistributor = do
+  oracle  <- allocateParty "ExampleOracle"
+  other   <- allocateParty "OtherOracle"
+  seller  <- allocateParty "Seller"
+  buyer   <- allocateParty "Buyer"
+  now     <- getTime
+  quoteCid <- submit oracle $ createCmd PriceQuote with
+    oracle, feedId = "BTC/USD", price = 65000.0, priceTime = now, publishedAt = now
+  offerCid <- submit seller $ createCmd QuoteTradeOffer with
+    seller, buyer, feedId = "BTC/USD", quantity = 0.5
+    expectedDistributor = other, maxQuoteAge = hours 24
+    quoteCid = toInterfaceContractId @PublishedQuote quoteCid
+  Some disc <- queryDisclosure oracle quoteCid
+  submitFailsWith buyer disc (exerciseCmd offerCid AcceptQuoteTrade) "untrusted distributor"
+
+-- The quote consumer rejects a quote older than its staleness bound: the quote
+-- was produced two hours ago and the offer admits at most one hour.
+testQuoteConsumerRejectsStaleQuote : Script ()
+testQuoteConsumerRejectsStaleQuote = do
+  oracle  <- allocateParty "ExampleOracle"
+  seller  <- allocateParty "Seller"
+  buyer   <- allocateParty "Buyer"
+  now     <- getTime
+  let producedAt = addRelTime now (hours (-2))
+  quoteCid <- submit oracle $ createCmd PriceQuote with
+    oracle, feedId = "BTC/USD", price = 65000.0
+    priceTime = producedAt, publishedAt = producedAt
+  offerCid <- submit seller $ createCmd QuoteTradeOffer with
+    seller, buyer, feedId = "BTC/USD", quantity = 0.5
+    expectedDistributor = oracle, maxQuoteAge = hours 1
+    quoteCid = toInterfaceContractId @PublishedQuote quoteCid
+  Some disc <- queryDisclosure oracle quoteCid
+  submitFailsWith buyer disc (exerciseCmd offerCid AcceptQuoteTrade) "quote too stale"

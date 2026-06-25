@@ -206,6 +206,7 @@ testConsumerWorkflowHappyPath = do
   sig <- signQuote f.keyPair.privateKey payload
   offer <- submit seller $ createCmd VerifiedQuoteTradeOffer with
     seller, buyer = f.reader, feedId = "BTC/USD", quantity = 2.0
+    expectedDistributor = f.oracle, maxQuoteAge = hours 24
     verifierCid = f.verifierIf
   settlementCid <- submit (actAs f.reader <> disclose f.disc) $
     exerciseCmd offer AcceptVerifiedQuoteTrade with payload, signature = sig
@@ -226,7 +227,62 @@ testConsumerWrongFeedRejected = do
   sig <- signQuote f.keyPair.privateKey payload
   offer <- submit seller $ createCmd VerifiedQuoteTradeOffer with
     seller, buyer = f.reader, feedId = "ETH/USD", quantity = 2.0
+    expectedDistributor = f.oracle, maxQuoteAge = hours 24
     verifierCid = f.verifierIf
   submitFailsWith f.reader f.disc
     (exerciseCmd offer AcceptVerifiedQuoteTrade with payload, signature = sig)
     "feed mismatch"
+
+-- The consumer rejects a verified quote from a distributor other than the one
+-- the offer pins. The signature verifies against the real oracle key, so the
+-- quote is authentic; the distributor gate, not the verifier, is what stops it.
+testConsumerUntrustedDistributorRejected : Script ()
+testConsumerUntrustedDistributorRejected = do
+  f <- setup
+  seller <- allocateParty "Seller"
+  other  <- allocateParty "OtherOracle"
+  now <- getTime
+  let payload = defaultPayload now
+  sig <- signQuote f.keyPair.privateKey payload
+  offer <- submit seller $ createCmd VerifiedQuoteTradeOffer with
+    seller, buyer = f.reader, feedId = "BTC/USD", quantity = 2.0
+    expectedDistributor = other, maxQuoteAge = hours 24
+    verifierCid = f.verifierIf
+  submitFailsWith f.reader f.disc
+    (exerciseCmd offer AcceptVerifiedQuoteTrade with payload, signature = sig)
+    "untrusted distributor"
+
+-- The consumer rejects a verified quote older than its staleness bound. The
+-- payload was produced two hours ago but still has a live window, so it verifies
+-- and the consumer's own `maxQuoteAge` of one hour is what rejects it.
+testConsumerStaleQuoteRejected : Script ()
+testConsumerStaleQuoteRejected = do
+  f <- setup
+  seller <- allocateParty "Seller"
+  now <- getTime
+  let payload = (defaultPayload now) with publishedAt = addRelTime now (hours (-2))
+  sig <- signQuote f.keyPair.privateKey payload
+  offer <- submit seller $ createCmd VerifiedQuoteTradeOffer with
+    seller, buyer = f.reader, feedId = "BTC/USD", quantity = 2.0
+    expectedDistributor = f.oracle, maxQuoteAge = hours 1
+    verifierCid = f.verifierIf
+  submitFailsWith f.reader f.disc
+    (exerciseCmd offer AcceptVerifiedQuoteTrade with payload, signature = sig)
+    "quote too stale"
+
+-- A payload signed with `publishedAt` after `expiresAt` is rejected by the
+-- verifier on the well-formedness check, before the expiry check. The window
+-- ends before it begins, so it could never be live; the signature is valid, so
+-- this proves the verifier rejects the ill-formed window itself.
+testPublishedAfterExpiryRejected : Script ()
+testPublishedAfterExpiryRejected = do
+  f <- setup
+  now <- getTime
+  let payload = (defaultPayload now) with
+        publishedAt = addRelTime now (hours 2)
+        expiresAt   = addRelTime now (hours 1)
+  sig <- signQuote f.keyPair.privateKey payload
+  submitFailsWith f.reader f.disc
+    (exerciseCmd f.verifierIf QuoteVerifier_Verify with
+      actor = f.reader, payload, signature = sig)
+    "published after expiry"

@@ -13,6 +13,8 @@ module DataConsumer.Trading where
 import DataStandard.DataPointV1
 import DataStandard.Utils
 
+import DA.Time (RelTime, subTime)
+
 -- | An offer to trade `quantity` of `assetPair` at whatever price the
 -- referenced publication carries when the buyer accepts.
 template TradeOffer
@@ -22,6 +24,17 @@ template TradeOffer
     assetPair    : Text
       -- ^ The feed the buyer expects the publication to be for.
     quantity     : Decimal
+    expectedDistributor : Party
+      -- ^ The one distributor whose price the buyer accepts. The standard makes
+      -- the publication's `distributor` authentic, but trusting that party is the
+      -- consumer's decision, so the buyer pins it here and the accept gates on
+      -- it. The price source stays the counterparty's choice through the
+      -- referenced publication; this only fixes which distributor the buyer is
+      -- willing to settle on.
+    maxQuoteAge : RelTime
+      -- ^ The largest age, now minus `publishedAt`, the buyer will settle on. The
+      -- publication carries no replay bound of its own, so this is the consumer's
+      -- own staleness policy.
     priceDataCid : ContractId PublishedData
       -- ^ Any `PublishedData` publication, identified through the interface
       -- rather than a concrete template.
@@ -32,14 +45,19 @@ template TradeOffer
     -- | Settle the trade at the published price, in the buyer's transaction.
     -- The price is read through `PublishedData_Fetch`. Confirming the
     -- publication is for the expected feed is the consumer's responsibility:
-    -- the standard authenticates the distributor, not the feed identity. A
-    -- production consumer would also bound the age of `publishedAt`.
+    -- the standard authenticates the distributor, not the feed identity. The
+    -- buyer also gates the `distributor` against `expectedDistributor` and bounds
+    -- the age of `publishedAt` by `maxQuoteAge`, so an untrusted distributor or a
+    -- publication older than the buyer's policy aborts before settlement.
     choice AcceptTrade : ContractId TradeSettlement
       controller buyer
       do
+        now <- getTime
         v <- exercise priceDataCid PublishedData_Fetch with actor = buyer
         publishedPair <- required "assetPair" (lookupField "assetPair" v.values)
         assertMsg "asset pair mismatch" (publishedPair == assetPair)
+        assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
+        assertMsg "data too stale" (subTime now v.publishedAt <= maxQuoteAge)
         price <- required "price" (lookupField "price" v.values)
         create TradeSettlement with
           seller, buyer, assetPair, quantity, price

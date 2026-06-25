@@ -65,6 +65,9 @@ data SignedPayload = SignedPayload with
       -- rejects a payload presented strictly after this time; the boundary
       -- instant itself is still accepted. This is the sole replay defence:
       -- a captured (payload, signature) pair stops verifying once it lapses.
+      -- Must be at or after `publishedAt`, since a window that ends before it
+      -- begins is never live; `QuoteVerifier_Verify` rejects such a payload on
+      -- "published after expiry" before reading the time.
     quote : Quote
       -- ^ The economic content: the feed, its price, and the market instant the
       -- price is observed for. Identical in meaning to `PublishedQuoteView.quote`.
@@ -163,11 +166,15 @@ interface QuoteVerifier where
   -- `VerifiedPayload`, without writing anything to the ledger. The choice is
   -- pure: it neither creates nor archives a contract, so the verifier is
   -- reusable and contention-free, and the result is consumed in the caller's own
-  -- transaction. It checks, in order, that the payload has not expired (the sole
-  -- replay defence) and that the signature is valid under the verifier's
-  -- resident public key, aborting at the first failure with a deterministic
-  -- message. Confirming the quote is for an expected feed is the consumer's
-  -- responsibility: the standard authenticates the signer, not the feed.
+  -- transaction. It checks, in order, that the signed window is well-formed
+  -- (`publishedAt` at or before `expiresAt`), that the payload has not expired
+  -- (the sole replay defence), and that the signature is valid under the
+  -- verifier's resident public key, aborting at the first failure with a
+  -- deterministic message. The well-formedness check rejects a payload that
+  -- could never have a live window before the time read, so an ill-formed window
+  -- fails on its own message rather than as an incidental expiry. Confirming the
+  -- quote is for an expected feed is the consumer's responsibility: the standard
+  -- authenticates the signer, not the feed.
   nonconsuming choice QuoteVerifier_Verify : VerifiedPayload
     with
       actor : Party
@@ -181,6 +188,7 @@ interface QuoteVerifier where
         -- hex-encoded DER ECDSA.
     controller actor
     do
+      assertMsg "published after expiry" (payload.publishedAt <= payload.expiresAt)
       now <- getTime
       assertMsg "payload expired" (now <= payload.expiresAt)
       let v = view this

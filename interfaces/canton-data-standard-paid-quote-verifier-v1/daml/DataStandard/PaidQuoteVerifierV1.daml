@@ -19,10 +19,12 @@
 -- replaying a genuine signature to redirect the fee to itself: the producer's
 -- key is public, so anyone can stand up such a verifier, but only a payload the
 -- producer signed for this payee settles through it. The payee may be a treasury
--- distinct from the signing oracle. Settlement must complete in one step; a
--- transfer left pending or failed aborts the whole verification, so a consumer
--- never receives a verified quote it has not paid for, and never pays for a quote
--- that does not verify.
+-- distinct from the signing oracle. A transfer left pending or failed aborts the
+-- whole verification, so a consumer never pays for a quote that does not verify.
+-- The transfer factory is caller-supplied, so on-ledger the choice confirms a
+-- settlement was reported, completion together with a non-empty set of credited
+-- holdings, rather than proving funds moved; resistance to a deliberate fee-skip
+-- rests on package vetting, as it does for the Token Standard transfer itself.
 module DataStandard.PaidQuoteVerifierV1 where
 
 import DataStandard.QuoteVerifierV1 (SignedPayload(..), VerifiedPayload(..), canonicalQuoteText)
@@ -91,6 +93,10 @@ data PaidSignedPayload = PaidSignedPayload with
       -- `PaidQuoteVerifier_VerifyAndPay` rejects a payload presented strictly after this time and
       -- also bounds the settling transfer to it, so a captured (payload,
       -- signature) pair stops verifying and stops being payable once it lapses.
+      -- Must be at or after `publishedAt`, since a window that ends before it
+      -- begins is never live; `PaidQuoteVerifier_VerifyAndPay` rejects such a
+      -- payload on "published after expiry" before reading the time or attempting
+      -- the fee.
     cost : Cost
       -- ^ The price of verifying this payload. Signed by the producer, so it
       -- cannot be tampered with; the fee actually settled is taken from here, not
@@ -228,20 +234,31 @@ interface PaidQuoteVerifier where
   -- quote as a `VerifiedPayload`. The choice's only ledger effect is the fee
   -- transfer: it neither creates nor archives the verifier, so one verifier
   -- serves an unbounded stream of paid calls. It proceeds in a fixed order,
-  -- aborting deterministically at the first failure: it checks the payload has
-  -- not expired (the sole replay defence), checks the signature is valid under
-  -- the verifier's resident public key over the canonical text including the
-  -- cost and the payee, requires the payee the producer signed to equal the
+  -- aborting deterministically at the first failure: it checks the signed window
+  -- is well-formed (`publishedAt` at or before `expiresAt`), checks the payload
+  -- has not expired (the sole replay defence), checks the signature is valid
+  -- under the verifier's resident public key over the canonical text including
+  -- the cost and the payee, requires the payee the producer signed to equal the
   -- verifier's pinned `payee`, rejects a non-positive `cost.fee`, then settles
-  -- the fee with a single direct transfer from `actor` to that payee and requires
-  -- that transfer to complete in one step.
+  -- the fee with one direct transfer from `actor` to the pinned payee, accepting
+  -- the settlement only if the transfer reports completion and produces at least
+  -- one receiver holding, which rejects a factory that reports success while
+  -- crediting nothing. The well-formedness check rejects a payload that could
+  -- never have a live window on its own message, before any fee is attempted.
   -- The signature now authenticates the payee, and the payee cross-check then
   -- rejects any verifier pinning a payee the producer did not sign for, so a
   -- substitute verifier carrying the producer's public key cannot replay a
   -- genuine signature to redirect the fee to itself.
-  -- A pending or failed settlement aborts the verification. Confirming the quote
-  -- is for an expected feed is the consumer's responsibility: the standard
-  -- authenticates the signer, not the feed.
+  -- The choice does not authenticate those holdings any further. The transfer
+  -- factory and the holdings are caller-supplied Token Standard interface
+  -- implementations whose reported owner, instrument, and amount a
+  -- registry-agnostic verifier cannot check against a genuine registry, so
+  -- on-ledger the choice confirms a settlement was reported, not that funds
+  -- moved. Resistance to a caller that deliberately skips the fee therefore rests
+  -- on the deployment vetting only honest Token Standard implementations, the
+  -- same trust the factory transfer itself carries. Confirming the quote is for
+  -- an expected feed is the consumer's responsibility: the standard authenticates
+  -- the signer, not the feed.
   nonconsuming choice PaidQuoteVerifier_VerifyAndPay : VerifiedPayload
     with
       actor : Party
@@ -261,6 +278,7 @@ interface PaidQuoteVerifier where
         -- the verifier's `payee` and the payload's `cost.fee`.
     controller actor
     do
+      assertMsg "published after expiry" (payload.publishedAt <= payload.expiresAt)
       now <- getTime
       assertMsg "payload expired" (now <= payload.expiresAt)
       let v = view this
@@ -281,7 +299,9 @@ interface PaidQuoteVerifier where
         transfer
         extraArgs = payment.context
       case result.output of
-        TransferInstructionResult_Completed _ -> pure ()
+        TransferInstructionResult_Completed receiverHoldingCids ->
+          assertMsg "fee settlement produced no receiver holdings"
+            (not (null receiverHoldingCids))
         _ -> abort "fee did not settle in one step"
       pure VerifiedPayload with
         distributor   = v.oracle
