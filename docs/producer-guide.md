@@ -237,8 +237,10 @@ followed by a `"|"` delimiter, with times rendered as integer milliseconds since
 the Unix epoch and the price via the standard `Decimal` rendering. The arity is
 fixed and `quote.feedId` is the only free-text field, so the encoding is injective
 and reproducible off-ledger as long as your feed ids carry no `"|"`. A feed id is a
-short symbol such as `"BTC/USD"`, so this is a constraint your signer enforces, not
-a practical limit; the on-ledger check does not reject a feed id that breaks it.
+short symbol such as `"BTC/USD"`, so this is rarely a practical limit; the verifier
+also enforces it on-ledger, rejecting any `feedId` that contains `"|"` (and, on the
+paid path, any instrument `id` that does) before it checks the signature, so a
+violating payload fails fast rather than verifying ambiguously.
 
 `quote.price` and the paid `cost.fee` are `Decimal`, which is `Numeric 10`. Daml's
 `show` renders them at the full scale of ten fractional digits with trailing zeros,
@@ -270,7 +272,17 @@ asset, or to a different party than you signed for. The paid encoding,
 `paidCanonicalText`, reuses the free quote prefix verbatim and appends the cost
 and the payee, so it is a distinct codec with its own identifier. It carries the
 same delimiter constraint as the free encoding, on `quote.feedId` and now also the
-instrument `id`: neither may contain `"|"`.
+instrument `id`: neither may contain `"|"`, and `PaidQuoteVerifier_VerifyAndPay`
+rejects a payload that breaks either on-ledger.
+
+The paid suffix appends four fields after the free quote prefix, in this fixed
+order, each followed by a `"|"` delimiter: `cost.fee` (a `Decimal`, rendered at
+full scale exactly like `quote.price`), `cost.instrument.admin`,
+`cost.instrument.id`, and the `payee`. The two `Party` fields,
+`cost.instrument.admin` and `payee`, are rendered with `partyToText`, which emits
+the fully-qualified party id (`<hint>::<fingerprint>`), not the bare hint, so your
+off-ledger signer must reproduce that exact form. The paid codec id is
+`paidQuoteCodecId` (`"v1-paid-quote-concat"`).
 
 The paid verifier template carries one extra field, the `payee` that the fee is
 credited to:

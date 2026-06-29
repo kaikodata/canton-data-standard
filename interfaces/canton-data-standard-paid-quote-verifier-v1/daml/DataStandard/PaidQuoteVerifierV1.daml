@@ -27,7 +27,7 @@
 -- rests on package vetting, as it does for the Token Standard transfer itself.
 module DataStandard.PaidQuoteVerifierV1 where
 
-import DataStandard.QuoteVerifierV1 (SignedPayload(..), VerifiedPayload(..), canonicalQuoteText)
+import DataStandard.QuoteVerifierV1 (SignedPayload(..), VerifiedPayload(..), canonicalQuoteText, delimiterFree)
 import DataStandard.Utils (Quote)
 
 import DA.Crypto.Text (secp256k1, sha256, toHex)
@@ -162,8 +162,9 @@ paidQuoteCodecId = "v1-paid-quote-concat"
 -- delimiter. The admin party is rendered with `partyToText` so the encoding is
 -- stable across participants. Appended after the free quote fields, it extends
 -- the encoding over the cost; like the quote prefix it stays injective only as
--- long as its free-text field, the instrument `id`, carries no "|", which a
--- producer's off-ledger signer must honour.
+-- long as its free-text field, the instrument `id`, carries no "|".
+-- `PaidQuoteVerifier_VerifyAndPay` enforces that on-ledger, rejecting an
+-- instrument `id` that contains the delimiter just as it does `quote.feedId`.
 canonicalCostText : Cost -> Text
 canonicalCostText c =
      show c.fee            <> "|"
@@ -187,7 +188,9 @@ canonicalPayeeText payee = partyToText payee <> "|"
 -- detect a substitute verifier: a signature commits to a single payee, so it does
 -- not verify a payload presented to a verifier pinning a different one. Its
 -- injectivity carries the same conditions as its parts: `quote.feedId` and the
--- instrument `id` must contain no "|". The signature is computed over this text;
+-- instrument `id` must contain no "|", both of which
+-- `PaidQuoteVerifier_VerifyAndPay` enforces on-ledger before checking the
+-- signature. The signature is computed over this text;
 -- `PaidQuoteVerifier_VerifyAndPay` rebuilds it and checks the signature against it.
 paidCanonicalText : PaidSignedPayload -> Text
 paidCanonicalText p =
@@ -236,7 +239,8 @@ interface PaidQuoteVerifier where
   -- serves an unbounded stream of paid calls. It proceeds in a fixed order,
   -- aborting deterministically at the first failure: it checks the signed window
   -- is well-formed (`publishedAt` at or before `expiresAt`), checks the payload
-  -- has not expired (the sole replay defence), checks the signature is valid
+  -- has not expired (the sole replay defence), rejects a `feedId` or instrument
+  -- `id` carrying the encoding delimiter, checks the signature is valid
   -- under the verifier's resident public key over the canonical text including
   -- the cost and the payee, requires the payee the producer signed to equal the
   -- verifier's pinned `payee`, rejects a non-positive `cost.fee`, then settles
@@ -282,6 +286,8 @@ interface PaidQuoteVerifier where
       now <- getTime
       assertMsg "payload expired" (now <= payload.expiresAt)
       let v = view this
+      assertMsg "feedId contains the reserved delimiter" (delimiterFree payload.quote.feedId)
+      assertMsg "instrument id contains the reserved delimiter" (delimiterFree payload.cost.instrument.id)
       assertMsg "invalid signature" (paidSignatureValid v.publicKey payload signature)
       assertMsg "payee mismatch" (v.payee == payload.payee)
       assertMsg "cost fee must be positive" (payload.cost.fee > 0.0)
