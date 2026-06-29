@@ -278,3 +278,40 @@ testQuoteConsumerRejectsStaleQuote = do
     quoteCid = toInterfaceContractId @PublishedQuote quoteCid
   Some disc <- queryDisclosure oracle quoteCid
   submitFailsWith buyer disc (exerciseCmd offerCid AcceptQuoteTrade) "quote too stale"
+
+-- The data-point consumer rejects a publication stamped in the future: a
+-- negative age must not read as fresh.
+testDataConsumerRejectsFutureDatedData : Script ()
+testDataConsumerRejectsFutureDatedData = do
+  oracle  <- allocateParty "ExampleOracle"
+  seller  <- allocateParty "Seller"
+  buyer   <- allocateParty "Buyer"
+  now     <- getTime
+  priceCid <- submit oracle $ createCmd PublishedPrice with
+    oracle, assetPair = "BTC/USD", price = 65000.0
+    at = addRelTime now (hours 2)
+  offerCid <- submit seller $ createCmd TradeOffer with
+    seller, buyer, assetPair = "BTC/USD", quantity = 0.5
+    expectedDistributor = oracle, maxQuoteAge = hours 24
+    priceDataCid = toInterfaceContractId @PublishedData priceCid
+  Some disc <- queryDisclosure oracle priceCid
+  submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade) "data published in the future"
+
+-- The quote consumer rejects a quote stamped in the future, the same future-age
+-- guard as the data-point consumer.
+testQuoteConsumerRejectsFutureDatedQuote : Script ()
+testQuoteConsumerRejectsFutureDatedQuote = do
+  oracle  <- allocateParty "ExampleOracle"
+  seller  <- allocateParty "Seller"
+  buyer   <- allocateParty "Buyer"
+  now     <- getTime
+  let producedAt = addRelTime now (hours 2)
+  quoteCid <- submit oracle $ createCmd PriceQuote with
+    oracle, feedId = "BTC/USD", price = 65000.0
+    priceTime = producedAt, publishedAt = producedAt
+  offerCid <- submit seller $ createCmd QuoteTradeOffer with
+    seller, buyer, feedId = "BTC/USD", quantity = 0.5
+    expectedDistributor = oracle, maxQuoteAge = hours 24
+    quoteCid = toInterfaceContractId @PublishedQuote quoteCid
+  Some disc <- queryDisclosure oracle quoteCid
+  submitFailsWith buyer disc (exerciseCmd offerCid AcceptQuoteTrade) "quote published in the future"

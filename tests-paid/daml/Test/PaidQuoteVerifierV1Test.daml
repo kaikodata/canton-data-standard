@@ -478,6 +478,46 @@ testNoOpTransferFactorySkipRejected = do
         actor = f.buyer, payload, signature = sig, payment = skipPayment )
     "fee settlement produced no receiver holdings"
 
+-- The paid consumer rejects a verified quote stamped in the future: it verifies
+-- and the fee would settle, but a future publishedAt must not read as fresh, so
+-- the consumer's future-age guard aborts and the fee rolls back.
+testPaidConsumerFutureDatedQuoteRejected : Script ()
+testPaidConsumerFutureDatedQuoteRejected = do
+  f <- setup
+  seller <- allocateParty "Seller"
+  now <- getTime
+  let payload = (defaultPayload f now) with
+        publishedAt = addRelTime now (hours 2)
+        expiresAt   = addRelTime now (hours 3)
+  sig <- signPaid f.keyPair.privateKey payload
+  offer <- submit seller $ createCmd PaidVerifiedQuoteTradeOffer with
+    seller, buyer = f.buyer, feedId = "BTC/USD", quantity = 2.0
+    expectedDistributor = f.oracle, maxQuoteAge = hours 24
+    verifierCid = f.verifierIf
+  submitFailsWithDiscs f
+    ( exerciseCmd offer AcceptPaidVerifiedQuoteTrade with
+        payload, signature = sig, payment = paymentArgs f )
+    "quote published in the future"
+
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  assertMsg "no fee settled for a future-dated quote" (null treasuryHoldings)
+
+-- A correctly-signed payload whose instrument id carries the encoding delimiter
+-- "|" is rejected before the signature check, the same guard the free verifier
+-- applies to feedId. No fee is attempted.
+testDelimiterInInstrumentIdRejected : Script ()
+testDelimiterInInstrumentIdRejected = do
+  f <- setup
+  now <- getTime
+  let base = defaultPayload f now
+      payload = base with
+        cost = (base.cost with instrument = (base.cost.instrument with id = "US|D"))
+  sig <- signPaid f.keyPair.privateKey payload
+  submitFailsWith f.buyer f.verifierDisc
+    ( exerciseCmd f.verifierIf PaidQuoteVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = sig, payment = paymentArgs f )
+    "instrument id contains the reserved delimiter"
+
 -- | As `submitFailsWith`, attaching the verifier, factory, and preapproval
 -- disclosures the buyer needs to reach the full settlement path.
 submitFailsWithDiscs : PaidFixture -> Commands a -> Text -> Script ()

@@ -20,6 +20,7 @@ import DataStandard.Utils (Quote)
 
 import DA.Crypto.Text (secp256k1, sha256, toHex)
 import DA.Date (Month(Jan), date)
+import qualified DA.Text as T
 import DA.Time (convertRelTimeToMicroseconds, subTime, time)
 
 -- | The on-ledger view every `QuoteVerifier` implementation exposes. It names
@@ -112,7 +113,8 @@ epoch = time (date 1970 Jan 1) 0 0 0
 
 -- | A time as integer milliseconds since the Unix epoch. The canonical encoding
 -- renders every time this way so the on-ledger and off-ledger encoders agree on
--- a single representation independent of how times are displayed.
+-- a single representation independent of how times are displayed. Payloads must
+-- not carry sub-millisecond timestamps, since the encoding renders at this scale.
 timeToMillis : Time -> Int
 timeToMillis t = convertRelTimeToMicroseconds (subTime t epoch) / 1000
 
@@ -125,10 +127,12 @@ timeToMillis t = convertRelTimeToMicroseconds (subTime t epoch) / 1000
 -- not a minimized one. The arity is fixed and `quote.feedId` is the only
 -- free-text field, so the encoding is injective and reproducible byte for byte as
 -- long as `quote.feedId` carries no "|" (a feed id is a short symbol such as
--- "BTC/USD"); a producer's off-ledger signer must honour that, since a feed id
--- containing the delimiter would shift the field boundaries and is not rejected
--- on-ledger here. The signature is computed over this text; `QuoteVerifier_Verify` rebuilds it and
--- checks the signature against it.
+-- "BTC/USD"). `QuoteVerifier_Verify` enforces that condition on-ledger: it
+-- rejects a payload whose `quote.feedId` contains the delimiter (via
+-- `delimiterFree`) before checking the signature, so the encoding's injectivity
+-- holds on-ledger rather than resting on producer convention. The signature is
+-- computed over this text; `QuoteVerifier_Verify` rebuilds it and checks the
+-- signature against it.
 canonicalQuoteText : SignedPayload -> Text
 canonicalQuoteText p =
      show (timeToMillis p.publishedAt) <> "|"
@@ -152,6 +156,14 @@ quoteSignatureValid : Text -> SignedPayload -> Text -> Bool
 quoteSignatureValid publicKey payload signature =
   secp256k1 signature (toHex (canonicalQuoteText payload)) publicKey
 
+-- | Whether `t` can be embedded in the canonical encoding without shifting field
+-- boundaries: `True` when it contains no "|", the delimiter `canonicalQuoteText`
+-- separates fields with. `QuoteVerifier_Verify` asserts it for the only free-text
+-- field it signs, `quote.feedId`, so the encoding is injective on-ledger rather
+-- than only by producer convention.
+delimiterFree : Text -> Bool
+delimiterFree t = not ("|" `T.isInfixOf` t)
+
 -- | The signature-verifier interface. A producer implements it on a template it
 -- signs as a Daml party (the disclosed verifier contract); a consumer obtains
 -- that contract through explicit disclosure and reads authenticated quotes
@@ -168,8 +180,9 @@ interface QuoteVerifier where
   -- reusable and contention-free, and the result is consumed in the caller's own
   -- transaction. It checks, in order, that the signed window is well-formed
   -- (`publishedAt` at or before `expiresAt`), that the payload has not expired
-  -- (the sole replay defence), and that the signature is valid under the
-  -- verifier's resident public key, aborting at the first failure with a
+  -- (the sole replay defence), that `quote.feedId` carries no encoding delimiter
+  -- (so the canonical text stays injective), and that the signature is valid
+  -- under the verifier's resident public key, aborting at the first failure with a
   -- deterministic message. The well-formedness check rejects a payload that
   -- could never have a live window before the time read, so an ill-formed window
   -- fails on its own message rather than as an incidental expiry. Confirming the
@@ -192,6 +205,7 @@ interface QuoteVerifier where
       now <- getTime
       assertMsg "payload expired" (now <= payload.expiresAt)
       let v = view this
+      assertMsg "feedId contains the reserved delimiter" (delimiterFree payload.quote.feedId)
       assertMsg "invalid signature" (quoteSignatureValid v.publicKey payload signature)
       pure VerifiedPayload with
         distributor   = v.oracle

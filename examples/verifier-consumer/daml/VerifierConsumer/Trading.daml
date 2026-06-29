@@ -69,6 +69,7 @@ template VerifiedQuoteTradeOffer
         v <- exercise verifierCid QuoteVerifier_Verify with actor = buyer, payload, signature
         assertMsg "feed mismatch" (v.quote.feedId == feedId)
         assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
+        assertMsg "quote published in the future" (v.publishedAt <= now)
         assertMsg "quote too stale" (subTime now v.publishedAt <= maxQuoteAge)
         create VerifiedQuoteTradeSettlement with
           seller, buyer, feedId, quantity

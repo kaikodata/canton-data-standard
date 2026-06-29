@@ -57,6 +57,7 @@ template TradeOffer
         publishedPair <- required "assetPair" (lookupField "assetPair" v.values)
         assertMsg "asset pair mismatch" (publishedPair == assetPair)
         assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
+        assertMsg "data published in the future" (v.publishedAt <= now)
         assertMsg "data too stale" (subTime now v.publishedAt <= maxQuoteAge)
         price <- required "price" (lookupField "price" v.values)
         create TradeSettlement with

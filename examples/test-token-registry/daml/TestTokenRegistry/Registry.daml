@@ -101,7 +101,7 @@ template TransferPreapproval
 -- | A transfer instruction representing a transfer that is pending the
 -- receiver's acceptance, for the path where no standing preapproval exists.
 --
--- The happy path proven by the spike never creates one of these: with a
+-- The preapproval happy path never creates one of these: with a
 -- preapproval in place the factory settles directly to `Completed`. It is
 -- defined so the registry genuinely implements the full `TransferInstruction`
 -- interface, including the receiver-controlled accept and the sender-controlled

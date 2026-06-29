@@ -1,16 +1,17 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Settlement spike: proves the showstopper risk for the paid verifier under
--- the genuine Canton Token Standard V1 interfaces. A one-step direct transfer
+-- | Proves the settlement property the paid verifier depends on, under the
+-- genuine Canton Token Standard V1 interfaces. A one-step direct transfer
 -- settles to a receiver that is a different party from the sender, authorized by
 -- the sender alone, with receive-side consent supplied by a standing
 -- preapproval the receiver maintains. The receiver is not a controller of the
 -- transfer choice and does not co-sign the settling submission.
 --
--- If this could not be done with sender-only authority, the paid verifier's
--- direct-transfer payment model would be unworkable; this test is the gate that
--- de-risks it before the payment path is wired into the verifier.
+-- This sender-only, one-step settlement is what lets
+-- `PaidQuoteVerifier_VerifyAndPay` charge a fee in the caller's own transaction.
+-- The property is pinned here independently of the verifier, so a regression in
+-- the token-standard settlement path is caught on its own.
 module Test.PaidSettlementTest where
 
 import DA.Assert ((===))
@@ -74,8 +75,8 @@ preapprovalArgs cid = ExtraArgs with
       [ (preapprovalContextKey, AV_ContractId (coerceContractId cid)) ]
   meta = emptyMetadata
 
--- The gate. The sender alone settles a transfer to a distinct treasury in one
--- step: the result is Completed, the sender's input holding is gone, and the
+-- The core property. The sender alone settles a transfer to a distinct treasury
+-- in one step: the result is Completed, the sender's input holding is gone, and the
 -- treasury holds exactly one new holding for the transferred amount. No
 -- TransferInstruction is left pending and the receiver never authorizes the
 -- submission.

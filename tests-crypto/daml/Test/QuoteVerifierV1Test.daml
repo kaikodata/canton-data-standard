@@ -286,3 +286,41 @@ testPublishedAfterExpiryRejected = do
     (exerciseCmd f.verifierIf QuoteVerifier_Verify with
       actor = f.reader, payload, signature = sig)
     "published after expiry"
+
+-- A correctly-signed payload whose feedId carries the encoding delimiter "|" is
+-- rejected before the signature check: the delimiter would shift the canonical
+-- text's field boundaries, so the verifier refuses it rather than verifying an
+-- ambiguous encoding. The signature is valid (the signer signed the same text),
+-- which proves the delimiter guard, not an incidental signature failure, rejects
+-- it.
+testDelimiterInFeedIdRejected : Script ()
+testDelimiterInFeedIdRejected = do
+  f <- setup
+  now <- getTime
+  let base = defaultPayload now
+      payload = base with quote = (base.quote with feedId = "BTC|USD")
+  sig <- signQuote f.keyPair.privateKey payload
+  submitFailsWith f.reader f.disc
+    (exerciseCmd f.verifierIf QuoteVerifier_Verify with
+      actor = f.reader, payload, signature = sig)
+    "feedId contains the reserved delimiter"
+
+-- The consumer rejects a verified quote stamped in the future. The payload has a
+-- live window, so it verifies, but its publishedAt is ahead of now, which the
+-- consumer's staleness gate must reject rather than read as freshly published.
+testConsumerFutureDatedQuoteRejected : Script ()
+testConsumerFutureDatedQuoteRejected = do
+  f <- setup
+  seller <- allocateParty "Seller"
+  now <- getTime
+  let payload = (defaultPayload now) with
+        publishedAt = addRelTime now (hours 2)
+        expiresAt   = addRelTime now (hours 3)
+  sig <- signQuote f.keyPair.privateKey payload
+  offer <- submit seller $ createCmd VerifiedQuoteTradeOffer with
+    seller, buyer = f.reader, feedId = "BTC/USD", quantity = 2.0
+    expectedDistributor = f.oracle, maxQuoteAge = hours 24
+    verifierCid = f.verifierIf
+  submitFailsWith f.reader f.disc
+    (exerciseCmd offer AcceptVerifiedQuoteTrade with payload, signature = sig)
+    "quote published in the future"
