@@ -122,9 +122,10 @@ timeToMillis t = convertRelTimeToMicroseconds (subTime t epoch) / 1000
 -- fields concatenated in the fixed order `publishedAt`, `expiresAt`,
 -- `quote.feedId`, `quote.price`, `quote.priceTime`, each followed by a "|"
 -- delimiter, with times as epoch-millisecond integers, and the price via Daml's
--- `show` for `Decimal` (a `Numeric 10`), which renders at the full scale of ten
--- fractional digits with trailing zeros; a signer must reproduce that exact form,
--- not a minimized one. The arity is fixed and `quote.feedId` is the only
+-- `show` for `Decimal` (a `Numeric 10`), which renders it in its shortest exact
+-- form, with at least one fractional digit and no trailing zeros (so "65000.0"
+-- stays "65000.0"), not a fixed-scale form padded to ten places; a signer must
+-- reproduce that exact form. The arity is fixed and `quote.feedId` is the only
 -- free-text field, so the encoding is injective and reproducible byte for byte as
 -- long as `quote.feedId` carries no "|" (a feed id is a short symbol such as
 -- "BTC/USD"). `QuoteVerifier_Verify` enforces that condition on-ledger: it

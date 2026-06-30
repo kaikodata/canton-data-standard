@@ -273,6 +273,130 @@ explicit disclosure when you are not a stakeholder of them. The paid path needs
 the Canton Token Standard interface DARs from [`dependencies/`](../dependencies)
 on your `daml.yaml` alongside the verifier DAR.
 
+## Reading a pulled, signed data point
+
+The verifier pair for the generic data point reads exactly like the quote pair,
+with one difference in the checks. Depend on the datapoint-verifier interface
+DAR, and reference the verifier as `ContractId DataPointVerifier`, the interface,
+never a producer's template:
+
+```yaml
+data-dependencies:
+  - <path-to>/canton-data-standard-utils-v1-0.1.0.dar
+  - <path-to>/canton-data-standard-datapoint-verifier-v1-0.1.0.dar
+```
+
+You obtain the verifier contract through explicit disclosure, reconstruct the
+signed data point into a `SignedDataPoint` (the `publishedAt`, the `expiresAt` the
+producer signed, the `schemaVersion`, and the `values` payload), and hand it with
+the signature to the `DataPointVerifier_Verify` choice:
+
+```daml
+import DataStandard.DataPointVerifierV1
+import DataStandard.Utils (lookupField)
+
+choice AcceptVerifiedDataPoint : ContractId RecordedRate
+  with
+    payload   : SignedDataPoint
+    signature : Text
+  controller subscriber
+  do
+    v <- exercise verifierCid DataPointVerifier_Verify with
+      actor = subscriber, payload, signature
+    assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
+    assertMsg "unexpected schema version" (v.schemaVersion == expectedSchemaVersion)
+    feedId <- case lookupField "feedId" v.values of
+      Some f -> pure (f : Text)
+      None   -> abort "payload missing feedId field"
+    assertMsg "feed mismatch" (feedId == expectedFeedId)
+    ...  -- record the rate read from v.values
+```
+
+The full version lives in
+[`examples/datapoint-verifier-consumer`](../examples/datapoint-verifier-consumer),
+a `RateSubscription` that records a verified rate as a `RecordedRate`.
+
+`DataPointVerifier_Verify` writes nothing to the ledger. It checks the payload has
+not expired and that the signature is valid under the verifier's resident public
+key, then returns a `VerifiedDataPoint` you use in the same transaction. A bad
+signature or an expired payload aborts the whole transaction, so nothing settles
+against an unauthenticated data point. Because the choice creates and archives
+nothing, one verifier serves every consumer and every data point at once.
+
+The `VerifiedDataPoint` is field-aligned with `PublishedDataView` on
+`distributor`, `publishedAt`, `schemaVersion`, and `values`, so the code that
+reads a verified data point is the code that reads a pushed one. The `distributor`
+is taken from the verifier, never from the payload, so a data point cannot claim a
+producer it was not signed by. It also carries the `canonicalHash`, `signature`,
+and `publicKey` as evidence, so the verification can be reproduced off-ledger
+later.
+
+The checks that remain yours differ from the quote case in one way: a data point
+has no top-level feed id. A quote carries `quote.feedId` on the view; a data
+point's feed identity lives inside `values`. So your identity gate is
+schema-aware. Confirm `distributor == expectedDistributor` (the field is
+authenticated, but you still choose whom to trust). Confirm `schemaVersion`
+matches what you expect, since it tells you how to read `values`. Then read a
+known identifier field out of `values` with `lookupField`, a `"feedId"` key for
+example, and check it. As with a quote, bound the age of `publishedAt` for
+staleness, and reject a future-dated `publishedAt`. The `expiresAt` window is the
+only replay defence the standard provides.
+
+### Reading a pulled data point and paying for it
+
+`PaidDataPointVerifier` is the same flow with a fee attached. You reconstruct a
+`PaidSignedDataPoint`, which is the free payload plus the `Cost` and the `payee`
+the producer signed, and you supply `PaymentArgs`: the Canton Token Standard
+transfer factory for the fee instrument, the holdings to pay from, and the
+registry-supplied context. You hand all of it to
+`PaidDataPointVerifier_VerifyAndPay`:
+
+```daml
+import DataStandard.PaidDataPointVerifierV1
+import DataStandard.Utils (lookupField)
+
+choice AcceptPaidVerifiedDataPoint : ContractId RecordedRate
+  with
+    payload   : PaidSignedDataPoint
+    signature : Text
+    payment   : PaymentArgs
+  controller subscriber
+  do
+    v <- exercise verifierCid PaidDataPointVerifier_VerifyAndPay with
+      actor = subscriber, payload, signature, payment
+    assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
+    assertMsg "unexpected schema version" (v.schemaVersion == expectedSchemaVersion)
+    feedId <- case lookupField "feedId" v.values of
+      Some f -> pure (f : Text)
+      None   -> abort "payload missing feedId field"
+    assertMsg "feed mismatch" (feedId == expectedFeedId)
+    ...  -- record the rate read from v.values
+```
+
+The full version lives in
+[`examples/paid-datapoint-verifier-consumer`](../examples/paid-datapoint-verifier-consumer),
+a `PaidRateSubscription` that settles into the same `RecordedRate` record the free
+[`examples/datapoint-verifier-consumer`](../examples/datapoint-verifier-consumer)
+produces.
+
+`PaidDataPointVerifier_VerifyAndPay` authenticates the payload and settles the fee
+atomically. The fee amount and the asset come from the `Cost` the producer signed,
+not from your arguments, and the recipient is the `payee` pinned on the verifier.
+The producer also signs that payee into the payload, and the call settles only
+when the two match, so you cannot be charged more than quoted and the fee cannot
+be redirected, not even through a substitute verifier that holds the producer's
+public key. The transfer is a single direct Canton Token Standard transfer you
+authorize as the sender, and the verification and the payment abort together, so
+you never pay for a data point that does not verify. The same two arguments are
+worth calling out as on the paid quote: `inputHoldingCids` are your own holdings
+of the fee instrument, and naming specific ones lets you use deliberate contention
+to avoid paying twice for the same call; `context` carries the receive-side
+consent the registry needs to settle directly, typically the payee's standing
+transfer preapproval. You obtain the transfer factory and the verifier through
+explicit disclosure when you are not a stakeholder of them, and the paid path
+needs the Canton Token Standard interface DARs from
+[`dependencies/`](../dependencies) on your `daml.yaml` alongside the verifier DAR.
+
 ## Reading at scale
 
 For querying many feeds across providers, prefer the

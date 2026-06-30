@@ -14,11 +14,16 @@ its tests. The security-relevant surface is concentrated in the verifier
 interfaces, where an off-ledger ECDSA signature over a canonical encoding is
 checked on-ledger:
 
-- the canonical encoding in `QuoteVerifierV1` and `PaidQuoteVerifierV1`, where a
-  mismatch between an off-ledger signer and the on-ledger check is a correctness
-  and trust issue,
+- the canonical encoding in `QuoteVerifierV1`, `PaidQuoteVerifierV1`,
+  `DataPointVerifierV1`, and `PaidDataPointVerifierV1`, where a mismatch between
+  an off-ledger signer and the on-ledger check is a correctness and trust issue.
+  The data point encoding is a recursive, length-prefixed TLV; a non-injective
+  encoding would let two distinct payloads collide on the same bytes and so let a
+  signature be reused for a payload the producer never signed, which makes
+  injectivity the security property the encoding has to hold,
 - the replay window (`expiresAt`) and the contract-resident public key, and
-- the paid path's settlement, where the fee must not be redirectable.
+- the paid path's settlement in `PaidQuoteVerifierV1` and
+  `PaidDataPointVerifierV1`, where the fee must not be redirectable.
 
 The reference producers, consumers, and the test token registry are
 illustrative, not production code. The registry in particular is a deliberately

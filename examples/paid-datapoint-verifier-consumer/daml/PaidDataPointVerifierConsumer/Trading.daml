@@ -1,0 +1,110 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | A reference consumer for the Data Standard's paid data point verifier
+-- interface: the pay-as-you-go sibling of the free `datapoint-verifier-consumer`
+-- example. It depends on the interface packages and on the free consumer for the
+-- shared `RecordedRate` record, and names no producer's template. The workflow
+-- demonstrates verify-pay-and-use in a single transaction: the subscriber supplies
+-- an off-ledger-signed reference-rate data point, the choice authenticates it
+-- through a disclosed `PaidDataPointVerifier`, pays the producer's per-call fee,
+-- confirms the schema and in-payload feed identity, and records the rate. The
+-- identity gate is the same schema-aware one the free consumer uses: a data point
+-- has no top-level feed identifier, so the consumer pins the `schemaVersion` and
+-- reads a known "feedId" field out of the payload `values` to confirm it received
+-- the data point it meant to.
+module PaidDataPointVerifierConsumer.Trading where
+
+import DataStandard.PaidDataPointVerifierV1
+import DataStandard.Utils (lookupField)
+import DataPointVerifierConsumer.Trading (RecordedRate(..))
+
+import DA.Time (RelTime, subTime)
+
+-- | The paid sibling of `RateSubscription`: a subscription recorded at the rate
+-- of a data point authenticated through a `PaidDataPointVerifier`, where accepting
+-- also pays the producer's per-call verification fee in the same transaction. The
+-- fee is settled by a direct token-standard transfer the subscriber authorizes
+-- alone, to whatever party the verifier pins as its payee. It records into the
+-- same `RecordedRate` record the free workflow produces.
+template PaidRateSubscription
+  with
+    subscriber : Party
+      -- ^ The party subscribing to the feed; signs the subscription, supplies the
+      -- signed data point, pays the verification fee from its own holdings, and
+      -- reads the recorded rate.
+    expectedDistributor : Party
+      -- ^ The one distributor whose data the subscriber accepts. The standard makes
+      -- the verified `distributor` authentic, but trusting that party is the
+      -- consumer's decision, so the subscriber pins it here and the accept gates on
+      -- it.
+    expectedSchemaVersion : Text
+      -- ^ The `schemaVersion` the subscriber expects the payload to carry. The
+      -- accept rejects any other schema, since a producer that changed its payload
+      -- shape may carry different field names or types and the subscriber only
+      -- knows how to read this one.
+    expectedFeedId : Text
+      -- ^ The feed the subscriber expects, matched against the "feedId" field read
+      -- out of the verified payload. A data point has no top-level feed identifier,
+      -- so this in-payload field is how the consumer confirms the authenticated data
+      -- point is for the feed it subscribed to.
+    maxAge : RelTime
+      -- ^ The largest age, now minus `publishedAt`, the subscriber will record. The
+      -- signed `expiresAt` is the standard's only replay bound; this is the
+      -- consumer's own tighter staleness policy, applied on top of it.
+    verifierCid : ContractId PaidDataPointVerifier
+      -- ^ Any `PaidDataPointVerifier`, identified through the interface rather than
+      -- a concrete template. The subscriber obtains it through explicit disclosure
+      -- when accepting.
+  where
+    signatory subscriber
+
+    -- | Record the rate from a producer-signed data point, paying the verification
+    -- fee, in the subscriber's transaction. `PaidDataPointVerifier_VerifyAndPay`
+    -- authenticates the payload and settles the fee atomically; an expired payload,
+    -- a bad signature, or a fee that does not settle in one step aborts the whole
+    -- transaction, so nothing is recorded and no fee is paid unless the data point
+    -- both verifies and is paid for. The subscriber then gates the verified
+    -- `distributor` against `expectedDistributor`, bounds the age of `publishedAt`
+    -- by `maxAge` (and rejects a future-dated payload), confirms the verified
+    -- `schemaVersion`, and reads the "feedId" and "rate" fields out of the payload,
+    -- recording the rate only when the feed identifier matches the subscription. The
+    -- distributor, staleness, schema, and identity gates all run after the fee has
+    -- settled inside the verifier, so a rejection there rolls the fee back with the
+    -- rest of the transaction.
+    choice RecordPaidSignedRate : ContractId RecordedRate
+      with
+        payload : PaidSignedDataPoint
+          -- ^ The off-ledger-signed paid data point the subscriber materialized.
+        signature : Text
+          -- ^ The producer's signature over the payload's canonical encoding.
+        payment : PaymentArgs
+          -- ^ The factory, holdings, and registry context the subscriber pays the
+          -- verification fee with.
+      controller subscriber
+      do
+        now <- getTime
+        v <- exercise verifierCid PaidDataPointVerifier_VerifyAndPay with
+          actor = subscriber, payload, signature, payment
+        assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
+        assertMsg "data point published in the future" (v.publishedAt <= now)
+        assertMsg "data point too stale" (subTime now v.publishedAt <= maxAge)
+        assertMsg "unexpected schema version" (v.schemaVersion == expectedSchemaVersion)
+        feedId <- case lookupField "feedId" v.values of
+          Some fid -> pure fid
+          None -> abort "payload missing feedId field"
+        assertMsg "feed mismatch" (feedId == expectedFeedId)
+        rate <- case lookupField "rate" v.values of
+          Some r -> pure (r : Decimal)
+          None -> abort "payload missing rate field"
+        create RecordedRate with
+          subscriber, feedId
+          rate
+          distributor = v.distributor
+          publishedAt = v.publishedAt
+          schemaVersion = v.schemaVersion
+
+    -- | Withdraw the subscription.
+    choice CancelPaidRateSubscription : ()
+      controller subscriber
+      do pure ()

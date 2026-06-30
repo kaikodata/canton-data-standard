@@ -11,11 +11,12 @@ depends on the other's code, only on the interface packages in this repository.
 The standard offers two ways to deliver the same data. The push interfaces
 (`PublishedData`, `PublishedQuote`) distribute data as on-ledger contracts the
 producer signs as a Daml party. The verifier interfaces (`QuoteVerifier`,
-`PaidQuoteVerifier`) distribute data the producer signs off-ledger with an
-ECDSA key, so a consumer pulls a signed quote and authenticates it on demand
-against a long-lived verifier contract that holds the producer's public key. A
-verified quote is field-aligned with a pushed one, so consumer code that reads
-a price is the same either way.
+`PaidQuoteVerifier`, `DataPointVerifier`, `PaidDataPointVerifier`) distribute
+data the producer signs off-ledger with an ECDSA key, so a consumer pulls a
+signed quote or data point and authenticates it on demand against a long-lived
+verifier contract that holds the producer's public key. A verified quote is
+field-aligned with a pushed one, and a verified data point with a pushed data
+point, so consumer code that reads a value is the same either way.
 
 The generic `PublishedData` interface fixes the shape a consumer reads: a
 distributor, a publication time, a schema version, and a key/value payload. It
@@ -47,10 +48,16 @@ shape a consumer builds against stays fixed for the life of a version.
 | `examples/verifier-consumer` | `verifier-consumer-example` | A reference consumer: a trade workflow that authenticates a pulled quote through a disclosed `QuoteVerifier`. Depends only on the interface packages, and is token-free. |
 | `examples/paid-verifier-producer` | `paid-verifier-producer-example` | A reference producer for the paid path: a `PaidSignatureVerifier` template implementing `PaidQuoteVerifier`, holding the public key and the fee payee. |
 | `examples/paid-verifier-consumer` | `paid-verifier-consumer-example` | A reference consumer for the paid path: a trade workflow that authenticates a pulled quote through a disclosed `PaidQuoteVerifier` and pays the per-call fee. Reuses the settlement record from `verifier-consumer`. |
+| `interfaces/canton-data-standard-datapoint-verifier-v1` | `canton-data-standard-datapoint-verifier-v1` | The `DataPointVerifier` interface: the data point sibling of `QuoteVerifier`. A long-lived contract that holds a producer's secp256k1 public key and authenticates off-ledger-signed data points through a pure `DataPointVerifier_Verify` choice that writes nothing to the ledger, under the recursive `v1-datapoint-tlv` canonical encoding. |
+| `interfaces/canton-data-standard-paid-datapoint-verifier-v1` | `canton-data-standard-paid-datapoint-verifier-v1` | The `PaidDataPointVerifier` interface: the pay-as-you-go sibling of `DataPointVerifier`. `PaidDataPointVerifier_VerifyAndPay` authenticates a data point and settles a producer-signed per-call fee, with a single Canton Token Standard transfer, in one transaction. |
+| `examples/datapoint-verifier-producer` | `datapoint-verifier-producer-example` | A reference producer: a `DataPointSignatureVerifier` template implementing the free `DataPointVerifier`, holding the public key. Token-free. |
+| `examples/datapoint-verifier-consumer` | `datapoint-verifier-consumer-example` | A reference consumer: a `RateSubscription` that authenticates a pulled data point through a disclosed `DataPointVerifier` and records it as a `RecordedRate`, gating on `distributor`, `schemaVersion`, and a `values` feed field. Depends only on the interface packages, and is token-free. |
+| `examples/paid-datapoint-verifier-producer` | `paid-datapoint-verifier-producer-example` | A reference producer for the paid path: a `PaidDataPointSignatureVerifier` template implementing `PaidDataPointVerifier`, holding the public key and the fee payee. |
+| `examples/paid-datapoint-verifier-consumer` | `paid-datapoint-verifier-consumer-example` | A reference consumer for the paid path: a `PaidRateSubscription` that authenticates a pulled data point through a disclosed `PaidDataPointVerifier` and pays the per-call fee. Reuses the `RecordedRate` record from `datapoint-verifier-consumer`. |
 | `examples/test-token-registry` | `test-token-registry` | A test-only registry implementing the Canton Token Standard holding and transfer interfaces, so the paid-verifier tests can settle a real one-step transfer. Not part of the standard. |
 | `tests` | `canton-data-standard-tests` | Daml Script tests for the push interfaces. Token-free and crypto-free, so its DAR runs against a live Canton ledger. |
-| `tests-crypto` | `canton-data-standard-tests-crypto` | Daml Script tests for the `QuoteVerifier` signature path, kept separate because they use Daml Script's `secp256k1` helpers, whose values the live-ledger script runner cannot load. They run in-memory. |
-| `tests-paid` | `canton-data-standard-tests-paid` | Daml Script tests for the paid path, which exercise the Canton Token Standard settlement and so depend on the token packages. |
+| `tests-crypto` | `canton-data-standard-tests-crypto` | Daml Script tests for the `QuoteVerifier` and `DataPointVerifier` signature paths, including golden vectors for both canonical encodings. Kept separate because they use Daml Script's `secp256k1` helpers, whose values the live-ledger script runner cannot load. They run in-memory. |
+| `tests-paid` | `canton-data-standard-tests-paid` | Daml Script tests for the paid path, both `PaidQuoteVerifier` and `PaidDataPointVerifier`, which exercise the Canton Token Standard settlement and so depend on the token packages. |
 
 ## Build and test
 
