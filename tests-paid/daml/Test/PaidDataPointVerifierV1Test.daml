@@ -1,0 +1,526 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the `PaidDataPointVerifier` interface against real secp256k1 keys
+-- and the genuine Canton Token Standard V1 settlement path. It mirrors the paid
+-- quote verifier's test suite for the data point payload. Each script generates a
+-- keypair with `secp256k1generatekeypair`, signs the canonical encoding of a paid
+-- payload (which includes the cost and the payee) with `secp256k1sign`, and
+-- exercises `PaidDataPointVerifier_VerifyAndPay` against a verifier created with
+-- the matching public key and a pinned payee. The fee settles to a treasury
+-- distinct from the signing oracle through the test token registry, with the
+-- treasury supplying a standing preapproval. Negative cases assert the specific
+-- abort message so each failure is shown to be for its intended reason.
+module Test.PaidDataPointVerifierV1Test where
+
+import DA.Assert ((===))
+import DA.Time (addRelTime, hours)
+import qualified DA.TextMap as TM
+import Daml.Script
+
+import DataStandard.PaidDataPointVerifierV1
+import DataStandard.Utils (Values, insertField)
+
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId(..))
+import Splice.Api.Token.MetadataV1
+import Splice.Api.Token.TransferInstructionV1
+  ( TransferFactory
+  , TransferFactoryView(..)
+  , TransferInstructionResult(..)
+  , TransferInstructionResult_Output(..)
+  )
+import TestTokenRegistry.Registry
+import PaidDataPointVerifierProducer.SignatureVerifier
+import PaidDataPointVerifierConsumer.Trading
+import Test.Fixtures (submitFailsWith, expectAbort)
+
+-- | A staged paid verifier: a real keypair, the on-ledger paid verifier holding
+-- the public key and pinning a treasury payee, a funded buyer/payer, the
+-- treasury's standing preapproval, the registry's transfer factory, and every
+-- disclosure the buyer needs to reach the oracle-signed verifier, the admin-signed
+-- factory, and the treasury-signed preapproval in one submission.
+data PaidFixture = PaidFixture with
+    oracle : Party
+    treasury : Party
+    buyer : Party
+    admin : Party
+    keyPair : Secp256k1KeyPair
+    instrumentId : InstrumentId
+    verifierTpl : ContractId PaidDataPointSignatureVerifier
+    verifierIf : ContractId PaidDataPointVerifier
+    verifierDisc : Disclosure
+    buyerHoldingCid : ContractId RegistryHolding
+    factoryCid : ContractId TransferFactory
+    factoryDisc : Disclosure
+    preapprovalCid : ContractId TransferPreapproval
+    preapprovalDisc : Disclosure
+
+-- | The fee every default payload quotes, in USD issued by the registry admin.
+defaultFee : Decimal
+defaultFee = 5.0
+
+-- | Stage the fixture: allocate parties, generate a keypair, publish the paid
+-- verifier with the treasury as payee, fund the buyer with a holding, stand up the
+-- factory, and have the treasury publish a preapproval, capturing the disclosures
+-- the buyer submits with.
+setup : Script PaidFixture
+setup = do
+  oracle <- allocateParty "Oracle"
+  treasury <- allocateParty "Treasury"
+  buyer <- allocateParty "Buyer"
+  admin <- allocateParty "RegistryAdmin"
+  keyPair <- secp256k1generatekeypair
+  let instrumentId = InstrumentId with admin, id = "USD"
+
+  verifierTpl <- submit oracle $ createCmd PaidDataPointSignatureVerifier with
+    oracle, payee = treasury, publicKey = keyPair.publicKey
+  Some verifierDisc <- queryDisclosure oracle verifierTpl
+
+  buyerHoldingCid <- submit admin $ createCmd RegistryHolding with
+    admin, owner = buyer, instrumentId, amount = 100.0
+
+  factoryTplCid <- submit admin $ createCmd RegistryTransferFactory with admin
+  let factoryCid = toInterfaceContractId @TransferFactory factoryTplCid
+  Some factoryDisc <- queryDisclosure admin factoryTplCid
+
+  preapprovalCid <- submit treasury $ createCmd TransferPreapproval with
+    admin, receiver = treasury, instrumentId
+  Some preapprovalDisc <- queryDisclosure treasury preapprovalCid
+
+  pure PaidFixture with
+    oracle, treasury, buyer, admin, keyPair, instrumentId
+    verifierTpl
+    verifierIf = toInterfaceContractId @PaidDataPointVerifier verifierTpl
+    verifierDisc, buyerHoldingCid, factoryCid, factoryDisc
+    preapprovalCid, preapprovalDisc
+
+-- | The payload of a standard reference-rate data point: a feed identifier and a
+-- rate, the shape the consumer example reads.
+ratePayload : Text -> Decimal -> Values
+ratePayload feedId rate =
+  insertField "rate" rate (insertField "feedId" feedId TM.empty)
+
+-- | A standard, valid paid payload: the EUR/USD reference rate at 1.0875, a 5 USD
+-- fee on the fixture's instrument, the fee committed to the fixture treasury (the
+-- payee the verifier pins), published now, expiring in 1h, schema "1.0.0".
+defaultPayload : PaidFixture -> Time -> PaidSignedDataPoint
+defaultPayload f now = PaidSignedDataPoint with
+  publishedAt = now
+  expiresAt   = addRelTime now (hours 1)
+  schemaVersion = "1.0.0"
+  values = ratePayload "EUR/USD" 1.0875
+  cost = Cost with
+    fee = defaultFee
+    instrument = f.instrumentId
+  payee = f.treasury
+
+-- | Sign a paid payload's canonical encoding with a private key, producing the
+-- same signature the producer would off-ledger. `secp256k1sign` SHA-256s the
+-- hex-encoded message internally, matching the on-ledger `secp256k1` check.
+signPaid : Text -> PaidSignedDataPoint -> Script Text
+signPaid privateKey payload =
+  secp256k1sign privateKey (paidDataPointCanonicalEncode payload)
+
+-- | The payment args carrying the buyer's holding and the treasury's preapproval
+-- in the standard choice context under the registry's well-known key.
+paymentArgs : PaidFixture -> PaymentArgs
+paymentArgs f = PaymentArgs with
+  transferFactoryCid = f.factoryCid
+  inputHoldingCids = [toInterfaceContractId @Holding f.buyerHoldingCid]
+  context = ExtraArgs with
+    context = ChoiceContext with
+      values = TM.fromList
+        [ (preapprovalContextKey, AV_ContractId (coerceContractId f.preapprovalCid)) ]
+    meta = emptyMetadata
+
+-- A valid signature verifies, returns the data point, and settles the fee to the
+-- pinned treasury in one step: the buyer's input holding is gone and the treasury
+-- holds exactly one new holding for the fee.
+testVerifyAndPayHappyPath : Script ()
+testVerifyAndPayHappyPath = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+  verified <- submit
+    ( actAs f.buyer
+        <> disclose f.verifierDisc
+        <> disclose f.factoryDisc
+        <> disclose f.preapprovalDisc
+    ) $
+    exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
+      actor = f.buyer, payload, signature = sig, payment = paymentArgs f
+
+  verified.distributor     === f.oracle
+  verified.schemaVersion   === "1.0.0"
+  verified.values          === payload.values
+  verified.publishedAt     === payload.publishedAt
+  verified.canonicalHash   === paidDataPointCanonicalHash payload
+  verified.signature       === sig
+  verified.publicKey        === f.keyPair.publicKey
+
+  -- The fee settled to the treasury, not the oracle.
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  credited <- case treasuryHoldings of
+    [(_, h)] -> pure h
+    _ -> abort ("expected exactly one treasury holding, got: " <> show (length treasuryHoldings))
+  credited.owner === f.treasury
+  credited.amount === defaultFee
+  credited.instrumentId === f.instrumentId
+
+  -- The buyer's input holding was spent.
+  buyerHolding <- queryContractId f.admin f.buyerHoldingCid
+  assertMsg "buyer input holding is archived" (buyerHolding == None)
+
+  -- The oracle, distinct from the payee, was credited nothing.
+  oracleHoldings <- query @RegistryHolding f.oracle
+  assertMsg "oracle (not the payee) receives no fee" (null oracleHoldings)
+
+-- A correctly-signed payload past its expiry is rejected before any payment is
+-- attempted: expiry is the sole replay defence.
+testExpiredRejected : Script ()
+testExpiredRejected = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload f now            -- expires now + 1h
+  sig <- signPaid f.keyPair.privateKey payload
+  passTime (hours 2)                            -- move strictly past expiresAt
+  submitFailsWithDiscs f
+    ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = sig, payment = paymentArgs f )
+    "payload expired"
+
+-- A signature that does not cover the cost is rejected: the canonical encoding the
+-- signature commits to includes the cost, so signing a payload with a different
+-- fee yields a signature that fails to verify the presented payload.
+testSignatureNotCoveringCostRejected : Script ()
+testSignatureNotCoveringCostRejected = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload f now
+      otherCost = payload with cost = (payload.cost with fee = 1.0)
+  wrongSig <- signPaid f.keyPair.privateKey otherCost
+  submitFailsWith f.buyer f.verifierDisc
+    ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = wrongSig, payment = paymentArgs f )
+    "invalid signature"
+
+-- A signature does not cover a different payee: signing a payload that names one
+-- payee and presenting it with another yields a signature that fails to verify,
+-- proving the payee is part of the signed canonical encoding. This is the
+-- companion to testRogueVerifierCannotRedirectFee: that test proves the pinned
+-- payee is cross-checked against the signed one, and this proves the signed payee
+-- itself cannot be forged to match a substitute verifier.
+testSignatureNotCoveringPayeeRejected : Script ()
+testSignatureNotCoveringPayeeRejected = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload f now
+      otherPayee = payload with payee = f.buyer
+  wrongSig <- signPaid f.keyPair.privateKey otherPayee
+  submitFailsWith f.buyer f.verifierDisc
+    ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = wrongSig, payment = paymentArgs f )
+    "invalid signature"
+
+-- A non-positive signed fee is rejected before any settlement. The fee is signed
+-- (so the signature check passes), proving the choice enforces the positive-fee
+-- invariant itself rather than leaving it to the registry's amount check.
+testZeroFeeRejected : Script ()
+testZeroFeeRejected = do
+  f <- setup
+  now <- getTime
+  let base = defaultPayload f now
+      payload = base with cost = (base.cost with fee = 0.0)
+  sig <- signPaid f.keyPair.privateKey payload
+  submitFailsWithDiscs f
+    ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = sig, payment = paymentArgs f )
+    "cost fee must be positive"
+
+-- The fee does not settle without the payee's standing preapproval: the registry
+-- refuses the transfer, so the choice aborts and no data point is returned.
+testNoPreapprovalRejected : Script ()
+testNoPreapprovalRejected = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+  let noPreapproval = (paymentArgs f) with
+        context = ExtraArgs with context = emptyChoiceContext, meta = emptyMetadata
+  submitFailsWithDiscsNoPreapproval f
+    ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = sig, payment = noPreapproval )
+    "receiver has no standing preapproval for this instrument"
+
+-- The payment instrument must match the signed cost: paying with a holding of a
+-- different instrument than the cost names is refused by the registry, so the call
+-- aborts and nothing settles.
+testPaymentInstrumentMismatchRejected : Script ()
+testPaymentInstrumentMismatchRejected = do
+  f <- setup
+  now <- getTime
+  let eurInstrument = InstrumentId with admin = f.admin, id = "EUR"
+  eurHoldingCid <- submit f.admin $ createCmd RegistryHolding with
+    admin = f.admin, owner = f.buyer, instrumentId = eurInstrument, amount = 100.0
+  let payload = defaultPayload f now            -- cost.instrument = USD
+  sig <- signPaid f.keyPair.privateKey payload
+  let mismatchedPayment = (paymentArgs f) with
+        inputHoldingCids = [toInterfaceContractId @Holding eurHoldingCid]
+  submitFailsWithDiscs f
+    ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = sig, payment = mismatchedPayment )
+    "input holding must match the transfer instrument"
+
+-- A paid payload signed with `publishedAt` after `expiresAt` is rejected by the
+-- verifier on the well-formedness check, before the expiry check and before any
+-- fee is attempted. The window ends before it begins, so it could never be live.
+testPaidPublishedAfterExpiryRejected : Script ()
+testPaidPublishedAfterExpiryRejected = do
+  f <- setup
+  now <- getTime
+  let payload = (defaultPayload f now) with
+        publishedAt = addRelTime now (hours 2)
+        expiresAt   = addRelTime now (hours 1)
+  sig <- signPaid f.keyPair.privateKey payload
+  submitFailsWithDiscs f
+    ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = sig, payment = paymentArgs f )
+    "published after expiry"
+
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  assertMsg "no fee settled for an ill-formed window" (null treasuryHoldings)
+
+-- A substitute verifier cannot redirect the fee. The producer's public key is
+-- public, so an attacker can deploy their own `PaidDataPointVerifier` holding that
+-- key but pinning themselves as payee, then replay a genuine oracle-signed payload
+-- through it. The payload's payee is signed (here the fixture treasury), so the
+-- signature still verifies against the real key, but the verifier pins a different
+-- payee, and the choice aborts on the payee cross-check rather than settling the
+-- fee to the attacker. The abort is specifically "payee mismatch", not a signature
+-- error, which proves the payee binding is the control that blocks the redirect.
+testRogueVerifierCannotRedirectFee : Script ()
+testRogueVerifierCannotRedirectFee = do
+  f <- setup
+  attacker <- allocateParty "Attacker"
+
+  rogueTpl <- submit attacker $ createCmd PaidDataPointSignatureVerifier with
+    oracle = attacker, payee = attacker, publicKey = f.keyPair.publicKey
+  let rogueIf = toInterfaceContractId @PaidDataPointVerifier rogueTpl
+
+  attackerHoldingCid <- submit f.admin $ createCmd RegistryHolding with
+    admin = f.admin, owner = attacker, instrumentId = f.instrumentId, amount = 100.0
+  attackerPreapprovalCid <- submit attacker $ createCmd TransferPreapproval with
+    admin = f.admin, receiver = attacker, instrumentId = f.instrumentId
+  Some attackerPreapprovalDisc <- queryDisclosure attacker attackerPreapprovalCid
+
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+  let attackerPayment = PaymentArgs with
+        transferFactoryCid = f.factoryCid
+        inputHoldingCids = [toInterfaceContractId @Holding attackerHoldingCid]
+        context = ExtraArgs with
+          context = ChoiceContext with
+            values = TM.fromList
+              [ (preapprovalContextKey, AV_ContractId (coerceContractId attackerPreapprovalCid)) ]
+          meta = emptyMetadata
+
+  expectAbort
+    ( trySubmit
+        ( actAs attacker
+            <> disclose f.factoryDisc
+            <> disclose attackerPreapprovalDisc
+        )
+        ( exerciseCmd rogueIf PaidDataPointVerifier_VerifyAndPay with
+            actor = attacker, payload, signature = sig, payment = attackerPayment )
+    )
+    "payee mismatch"
+
+  attackerHoldings <- query @RegistryHolding attacker
+  assertMsg "no fee was redirected to the attacker"
+    (all (\(_, h) -> h.amount /= defaultFee || h.owner /= attacker) attackerHoldings)
+
+-- | A counterfeit transfer factory that reports a completed transfer while moving
+-- nothing, crediting no receiver holdings.
+template NoOpTransferFactory
+  with
+    operator : Party
+  where
+    signatory operator
+
+    interface instance TransferFactory for NoOpTransferFactory where
+      view = TransferFactoryView with admin = operator, meta = emptyMetadata
+      transferFactory_transferImpl _self _arg =
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with receiverHoldingCids = []
+          senderChangeCids = []
+          meta = emptyMetadata
+      transferFactory_publicFetchImpl _self _arg =
+        pure TransferFactoryView with admin = operator, meta = emptyMetadata
+
+-- A factory that reports completion while crediting no holdings cannot be used to
+-- skip the fee. The buyer presents a genuine oracle-signed payload to the genuine
+-- verifier but points the payment at a no-op factory it controls, which returns a
+-- `Completed` result with an empty receiver-holding set. The choice rejects the
+-- settlement on the non-empty-holdings check rather than returning a verified data
+-- point, so a data point is never delivered against a transfer that moved nothing.
+-- The abort is specifically "fee settlement produced no receiver holdings".
+testNoOpTransferFactorySkipRejected : Script ()
+testNoOpTransferFactorySkipRejected = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+
+  noOpFactoryTplCid <- submit f.buyer $ createCmd NoOpTransferFactory with operator = f.buyer
+  let noOpFactoryCid = toInterfaceContractId @TransferFactory noOpFactoryTplCid
+      skipPayment = (paymentArgs f) with transferFactoryCid = noOpFactoryCid
+
+  submitFailsWith f.buyer f.verifierDisc
+    ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
+        actor = f.buyer, payload, signature = sig, payment = skipPayment )
+    "fee settlement produced no receiver holdings"
+
+-- End-to-end paid verify-and-use: the consumer workflow authenticates a signed
+-- data point through a disclosed paid verifier, pays the fee to the treasury, and
+-- records the rate at the verified value in a single transaction, gating on schema
+-- and in-payload feed identity.
+testConsumerPaidWorkflowHappyPath : Script ()
+testConsumerPaidWorkflowHappyPath = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+  sub <- submit f.buyer $ createCmd PaidRateSubscription with
+    subscriber = f.buyer, expectedDistributor = f.oracle
+    expectedSchemaVersion = "1.0.0", expectedFeedId = "EUR/USD"
+    maxAge = hours 24, verifierCid = f.verifierIf
+  recordedCid <- submit
+    ( actAs f.buyer
+        <> disclose f.verifierDisc
+        <> disclose f.factoryDisc
+        <> disclose f.preapprovalDisc
+    ) $
+    exerciseCmd sub RecordPaidSignedRate with
+      payload, signature = sig, payment = paymentArgs f
+  Some r <- queryContractId f.buyer recordedCid
+  r.feedId        === "EUR/USD"
+  r.rate          === 1.0875
+  r.distributor   === f.oracle
+  r.schemaVersion === "1.0.0"
+
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  assertMsg "the treasury was paid the fee" (length treasuryHoldings == 1)
+
+-- The paid consumer rejects a verified data point from a distributor other than
+-- the one the subscription pins. The payload verifies and the fee would settle, but
+-- the consumer's distributor gate aborts the whole transaction, so nothing settles.
+testPaidConsumerUntrustedDistributorRejected : Script ()
+testPaidConsumerUntrustedDistributorRejected = do
+  f <- setup
+  other  <- allocateParty "OtherOracle"
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+  sub <- submit f.buyer $ createCmd PaidRateSubscription with
+    subscriber = f.buyer, expectedDistributor = other
+    expectedSchemaVersion = "1.0.0", expectedFeedId = "EUR/USD"
+    maxAge = hours 24, verifierCid = f.verifierIf
+  submitFailsWithDiscs f
+    ( exerciseCmd sub RecordPaidSignedRate with
+        payload, signature = sig, payment = paymentArgs f )
+    "untrusted distributor"
+
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  assertMsg "no fee settled when the distributor is untrusted" (null treasuryHoldings)
+
+-- The paid consumer rejects a verified data point older than its staleness bound.
+-- The payload was produced two hours ago but still has a live window, so it
+-- verifies; the consumer's `maxAge` of one hour rejects it and the fee rolls back.
+testPaidConsumerStaleRejected : Script ()
+testPaidConsumerStaleRejected = do
+  f <- setup
+  now <- getTime
+  let payload = (defaultPayload f now) with publishedAt = addRelTime now (hours (-2))
+  sig <- signPaid f.keyPair.privateKey payload
+  sub <- submit f.buyer $ createCmd PaidRateSubscription with
+    subscriber = f.buyer, expectedDistributor = f.oracle
+    expectedSchemaVersion = "1.0.0", expectedFeedId = "EUR/USD"
+    maxAge = hours 1, verifierCid = f.verifierIf
+  submitFailsWithDiscs f
+    ( exerciseCmd sub RecordPaidSignedRate with
+        payload, signature = sig, payment = paymentArgs f )
+    "data point too stale"
+
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  assertMsg "no fee settled when the data point is stale" (null treasuryHoldings)
+
+-- The paid consumer rejects a verified data point whose in-payload feed id is not
+-- the one subscribed to: it verifies and the fee would settle, but the identity
+-- gate aborts and the fee rolls back.
+testPaidConsumerWrongFeedRejected : Script ()
+testPaidConsumerWrongFeedRejected = do
+  f <- setup
+  now <- getTime
+  let payload = defaultPayload f now            -- feedId = EUR/USD
+  sig <- signPaid f.keyPair.privateKey payload
+  sub <- submit f.buyer $ createCmd PaidRateSubscription with
+    subscriber = f.buyer, expectedDistributor = f.oracle
+    expectedSchemaVersion = "1.0.0", expectedFeedId = "GBP/USD"
+    maxAge = hours 24, verifierCid = f.verifierIf
+  submitFailsWithDiscs f
+    ( exerciseCmd sub RecordPaidSignedRate with
+        payload, signature = sig, payment = paymentArgs f )
+    "feed mismatch"
+
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  assertMsg "no fee settled for a wrong-feed data point" (null treasuryHoldings)
+
+-- The paid consumer rejects a verified data point stamped in the future: it
+-- verifies and the fee would settle, but a future publishedAt must not read as
+-- fresh, so the consumer's future-age guard aborts and the fee rolls back.
+testPaidConsumerFutureDatedRejected : Script ()
+testPaidConsumerFutureDatedRejected = do
+  f <- setup
+  now <- getTime
+  let payload = (defaultPayload f now) with
+        publishedAt = addRelTime now (hours 2)
+        expiresAt   = addRelTime now (hours 3)
+  sig <- signPaid f.keyPair.privateKey payload
+  sub <- submit f.buyer $ createCmd PaidRateSubscription with
+    subscriber = f.buyer, expectedDistributor = f.oracle
+    expectedSchemaVersion = "1.0.0", expectedFeedId = "EUR/USD"
+    maxAge = hours 24, verifierCid = f.verifierIf
+  submitFailsWithDiscs f
+    ( exerciseCmd sub RecordPaidSignedRate with
+        payload, signature = sig, payment = paymentArgs f )
+    "data point published in the future"
+
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  assertMsg "no fee settled for a future-dated data point" (null treasuryHoldings)
+
+-- | As `submitFailsWith`, attaching the verifier, factory, and preapproval
+-- disclosures the buyer needs to reach the full settlement path.
+submitFailsWithDiscs : PaidFixture -> Commands a -> Text -> Script ()
+submitFailsWithDiscs f cmds = expectAbort
+  ( trySubmit
+      ( actAs f.buyer
+          <> disclose f.verifierDisc
+          <> disclose f.factoryDisc
+          <> disclose f.preapprovalDisc
+      )
+      cmds
+  )
+
+-- | As `submitFailsWithDiscs`, but for the path that supplies no preapproval, so
+-- only the verifier and factory are disclosed.
+submitFailsWithDiscsNoPreapproval : PaidFixture -> Commands a -> Text -> Script ()
+submitFailsWithDiscsNoPreapproval f cmds = expectAbort
+  ( trySubmit
+      ( actAs f.buyer
+          <> disclose f.verifierDisc
+          <> disclose f.factoryDisc
+      )
+      cmds
+  )

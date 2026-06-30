@@ -1,0 +1,125 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | A reference consumer for the Data Standard's free data point verifier
+-- interface. It is the data point analogue of the `verifier-consumer` example:
+-- it depends only on the interface packages and names no producer's template.
+-- The workflow demonstrates verify-and-use in a single transaction for an open
+-- key/value data point rather than a fixed quote. The subscriber supplies an
+-- off-ledger-signed reference-rate data point, the choice authenticates it
+-- through a disclosed `DataPointVerifier`, confirms it is the expected feed, and
+-- records the rate.
+--
+-- A data point has no top-level feed identifier the way a quote has `feedId`, so
+-- the consumer's identity gate is schema-aware: it confirms the verified
+-- `schemaVersion` matches the one it expects, then reads a known identifier field
+-- ("feedId") out of the payload `values` with `lookupField` and checks it equals
+-- the feed it subscribed to. Authenticating the signer (which the verifier does)
+-- is necessary but not sufficient; pinning the schema and the in-payload feed id
+-- is how a consumer of a generic payload confirms it received the data point it
+-- meant to. The pay-as-you-go workflow lives in the
+-- `paid-datapoint-verifier-consumer` example.
+module DataPointVerifierConsumer.Trading where
+
+import DataStandard.DataPointVerifierV1
+import DataStandard.Utils (lookupField)
+
+import DA.Time (RelTime, subTime)
+
+-- | A subscription to a producer's signed reference-rate feed. Accepting it with
+-- a signed data point records the rate the producer published, but only once the
+-- data point verifies, comes from the trusted distributor, is fresh, and matches
+-- the subscribed feed's schema and identifier.
+template RateSubscription
+  with
+    subscriber : Party
+      -- ^ The party subscribing to the feed; signs the subscription and reads
+      -- the recorded rate.
+    expectedDistributor : Party
+      -- ^ The one distributor whose data the subscriber accepts. The standard
+      -- makes the verified `distributor` authentic, but trusting that party is
+      -- the consumer's decision, so the subscriber pins it here and the accept
+      -- gates on it.
+    expectedSchemaVersion : Text
+      -- ^ The `schemaVersion` the subscriber expects the payload to carry. The
+      -- accept rejects any other schema, since a producer that changed its
+      -- payload shape may carry different field names or types and the subscriber
+      -- only knows how to read this one.
+    expectedFeedId : Text
+      -- ^ The feed the subscriber expects, matched against the "feedId" field
+      -- read out of the verified payload. A data point has no top-level feed
+      -- identifier, so this in-payload field is how the consumer confirms the
+      -- authenticated data point is for the feed it subscribed to.
+    maxAge : RelTime
+      -- ^ The largest age, now minus `publishedAt`, the subscriber will record.
+      -- The signed `expiresAt` is the standard's only replay bound; this is the
+      -- consumer's own tighter staleness policy, applied on top of it.
+    verifierCid : ContractId DataPointVerifier
+      -- ^ Any `DataPointVerifier`, identified through the interface rather than a
+      -- concrete template. The subscriber obtains it through explicit disclosure
+      -- when accepting.
+  where
+    signatory subscriber
+
+    -- | Record the rate from a producer-signed data point, in the subscriber's
+    -- transaction. The signed payload is authenticated through
+    -- `DataPointVerifier_Verify`; an expired payload or a bad signature aborts the
+    -- whole transaction, so nothing is recorded against an unauthenticated data
+    -- point. The subscriber then gates the verified `distributor` against
+    -- `expectedDistributor`, bounds the age of `publishedAt` by `maxAge` (and
+    -- rejects a future-dated payload), confirms the verified `schemaVersion`, and
+    -- finally reads the "feedId" and "rate" fields out of the payload, recording
+    -- the rate only when the feed identifier matches the subscription.
+    choice RecordSignedRate : ContractId RecordedRate
+      with
+        payload : SignedDataPoint
+          -- ^ The off-ledger-signed data point the subscriber materialized.
+        signature : Text
+          -- ^ The producer's signature over the payload's canonical encoding.
+      controller subscriber
+      do
+        now <- getTime
+        v <- exercise verifierCid DataPointVerifier_Verify with
+          actor = subscriber, payload, signature
+        assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
+        assertMsg "data point published in the future" (v.publishedAt <= now)
+        assertMsg "data point too stale" (subTime now v.publishedAt <= maxAge)
+        assertMsg "unexpected schema version" (v.schemaVersion == expectedSchemaVersion)
+        feedId <- case lookupField "feedId" v.values of
+          Some fid -> pure fid
+          None -> abort "payload missing feedId field"
+        assertMsg "feed mismatch" (feedId == expectedFeedId)
+        rate <- case lookupField "rate" v.values of
+          Some r -> pure (r : Decimal)
+          None -> abort "payload missing rate field"
+        create RecordedRate with
+          subscriber, feedId
+          rate
+          distributor = v.distributor
+          publishedAt = v.publishedAt
+          schemaVersion = v.schemaVersion
+
+    -- | Withdraw the subscription.
+    choice CancelRateSubscription : ()
+      controller subscriber
+      do pure ()
+
+-- | The record of a recorded reference rate, capturing which producer's signed
+-- data point it came from, the feed and schema it was published under, and when
+-- the producer produced it, so a later review has the provenance.
+template RecordedRate
+  with
+    subscriber : Party
+      -- ^ The subscribing party.
+    feedId : Text
+      -- ^ The feed the rate is for, read from the verified payload.
+    rate : Decimal
+      -- ^ The recorded rate the producer published for the feed.
+    distributor : Party
+      -- ^ The producer whose signature authenticated the rate.
+    publishedAt : Time
+      -- ^ When the producer produced the data point.
+    schemaVersion : Text
+      -- ^ The schema version the recorded payload was published under.
+  where
+    signatory subscriber

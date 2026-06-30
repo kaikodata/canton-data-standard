@@ -1,0 +1,350 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The signature-verifier half of the generic data point standard. Where
+-- `DataStandard.DataPointV1` distributes a data point by publishing an on-ledger
+-- contract the producer signs as a Daml party, this interface distributes a data
+-- point the producer signed off-ledger with an ECDSA key: a client materializes
+-- the signed record, hands it to `DataPointVerifier_Verify`, and receives a
+-- `VerifiedDataPoint` that a consumer reads as it reads a pushed
+-- `PublishedDataView`.
+--
+-- It is the data point analogue of `DataStandard.QuoteVerifierV1`: same single
+-- long-lived verifier holding the producer's public key, same feed-agnostic
+-- authentication of the signer rather than the feed, same nonconsuming choice
+-- that writes nothing to the ledger so one verifier serves any number of
+-- payloads concurrently without contention. The payload it carries is the
+-- open key/value `Values` map of a data point rather than a fixed price quote,
+-- so its canonical encoding is the recursive, length-prefixed TLV defined here
+-- (`canonicalDataPointEncode`) rather than the quote codec's flat delimited text.
+module DataStandard.DataPointVerifierV1 where
+
+import DataStandard.Utils (AnyValue(..), Values)
+
+import DA.Crypto.Text (secp256k1, sha256, toHex)
+import DA.Date (Month(Jan), date)
+import qualified DA.Text as T
+import qualified DA.TextMap as TM
+import DA.Time (convertRelTimeToMicroseconds, subTime, time)
+
+-- | The on-ledger view every `DataPointVerifier` implementation exposes. It
+-- names the producer and pins the public key the producer's signatures are
+-- checked against, so the key a payload is verified with is fixed by the
+-- contract a consumer chose to trust, never supplied alongside the payload.
+data DataPointVerifierView = DataPointVerifierView with
+    oracle : Party
+      -- ^ The producer that signed the payloads this verifier accepts, and the
+      -- party that signs and distributes the verifier contract itself. Becomes
+      -- the `distributor` of every `VerifiedDataPoint`, so a consumer trusts a
+      -- producer just as the push side trusts a `PublishedDataView.distributor`.
+    publicKey : Text
+      -- ^ The producer's secp256k1 public key, hex-encoded in DER form, against
+      -- which `DataPointVerifier_Verify` checks every signature. Resident on the
+      -- contract rather than passed per call, so a caller cannot substitute a key
+      -- of its own; rotating the key is replacing the verifier contract.
+    hashMethod : Text
+      -- ^ The digest algorithm the signature commits to, the constant "SHA-256".
+      -- Advertised for off-ledger re-verification tooling; the on-ledger check is
+      -- fixed by this interface and does not read this field.
+    signMethod : Text
+      -- ^ The signature scheme, the constant "secp256k1". Advertised for the
+      -- same off-ledger tooling; the on-ledger check is fixed by this interface.
+    payloadCodec : Text
+      -- ^ The identifier of the canonical encoding the signature was produced
+      -- over, the constant "v1-datapoint-tlv". A consumer or auditor uses it to
+      -- select the matching off-ledger encoder when reproducing the signed bytes.
+  deriving (Eq, Show)
+
+-- | The record a client reconstructs and hands to `DataPointVerifier_Verify`. It
+-- is the exact set of fields the producer signed off-ledger: the data point's
+-- payload plus the validity window the signature commits to. The signature
+-- itself travels beside it as a `DataPointVerifier_Verify` argument rather than
+-- inside it, because the signature is over the encoding of these fields and
+-- cannot also cover itself.
+data SignedDataPoint = SignedDataPoint with
+    publishedAt : Time
+      -- ^ When the producer produced and signed the data point. Becomes the
+      -- `publishedAt` of the `VerifiedDataPoint`; carries the same meaning as
+      -- `PublishedDataView.publishedAt`. A consumer uses it for staleness checks.
+    expiresAt : Time
+      -- ^ The instant after which the payload is no longer accepted.
+      -- `DataPointVerifier_Verify` rejects a payload presented strictly after
+      -- this time; the boundary instant itself is still accepted. This is the
+      -- sole replay defence: a captured (payload, signature) pair stops verifying
+      -- once it lapses. Must be at or after `publishedAt`, since a window that
+      -- ends before it begins is never live; `DataPointVerifier_Verify` rejects
+      -- such a payload on "published after expiry" before reading the time.
+    schemaVersion : Text
+      -- ^ Version of the `values` schema, using semantic versioning. Identical in
+      -- meaning to `PublishedDataView.schemaVersion`: it describes a given feed's
+      -- payload and evolves per provider, independently of this package's version.
+      -- Signed by the producer and so committed to by the signature.
+    values : Values
+      -- ^ The data point's payload, a map of field names to tagged values.
+      -- Identical in meaning to `PublishedDataView.values`. The recursive part of
+      -- the signed bytes; `canonicalDataPointEncode` serializes it in a fixed
+      -- key-sorted order so the same payload always produces the same bytes.
+  deriving (Eq, Show)
+
+-- | The in-memory result `DataPointVerifier_Verify` returns on success. It
+-- carries no contract id because the choice writes nothing to the ledger; a
+-- consumer uses it directly in the same transaction. The leading four fields are
+-- semantically aligned with `PublishedDataView` (`distributor`, `publishedAt`,
+-- `schemaVersion`, `values`), so consumer code reading a verified data point is
+-- identical to code reading a pushed one. It carries no `metadata` field, since
+-- metadata is an envelope annotation the producer does not sign and so cannot be
+-- authenticated, just as `VerifiedPayload` drops it on the quote side. The
+-- trailing three are the evidence triple, retained so the verification can be
+-- reproduced off-ledger.
+data VerifiedDataPoint = VerifiedDataPoint with
+    distributor : Party
+      -- ^ The producer whose key validated the signature, taken from the
+      -- verifier's `oracle`. Never taken from the payload, so a payload cannot
+      -- claim a distributor it was not signed by.
+    publishedAt : Time
+      -- ^ Copied from the verified payload: when the producer produced the data
+      -- point.
+    schemaVersion : Text
+      -- ^ Copied from the verified payload: the version of the authenticated
+      -- payload's schema.
+    values : Values
+      -- ^ Copied from the verified payload: the authenticated key/value payload.
+    canonicalHash : Text
+      -- ^ The SHA-256 digest of the canonical encoding, hex-encoded. This is the
+      -- digest the signature commits to; retained as evidence for off-ledger
+      -- re-verification.
+    signature : Text
+      -- ^ The verified signature, hex-encoded DER ECDSA. Retained as evidence.
+    publicKey : Text
+      -- ^ The public key the signature verified against, copied from the
+      -- verifier. Retained as evidence so re-verification needs nothing else.
+  deriving (Eq, Show)
+
+-- | The identifier of the canonical encoding `DataPointVerifier_Verify`
+-- reproduces and checks the signature over. A producer's off-ledger signer must
+-- encode with the matching algorithm; a consumer reads it from the view to
+-- select that encoder.
+dataPointCodecId : Text
+dataPointCodecId = "v1-datapoint-tlv"
+
+-- | The Unix epoch, the origin the canonical encoding renders times relative to.
+epoch : Time
+epoch = time (date 1970 Jan 1) 0 0 0
+
+-- | A time as integer milliseconds since the Unix epoch. The canonical encoding
+-- renders every time this way so the on-ledger and off-ledger encoders agree on
+-- a single representation independent of how times are displayed. Payloads must
+-- not carry sub-millisecond timestamps, since the encoding renders at this scale.
+timeToMillis : Time -> Int
+timeToMillis t = convertRelTimeToMicroseconds (subTime t epoch) / 1000
+
+-- | One nibble (0-15) as its lowercase hexadecimal digit. The building block of
+-- every byte rendered by the encoder.
+hexDigit : Int -> Text
+hexDigit n
+  | n == 0 = "0"
+  | n == 1 = "1"
+  | n == 2 = "2"
+  | n == 3 = "3"
+  | n == 4 = "4"
+  | n == 5 = "5"
+  | n == 6 = "6"
+  | n == 7 = "7"
+  | n == 8 = "8"
+  | n == 9 = "9"
+  | n == 10 = "a"
+  | n == 11 = "b"
+  | n == 12 = "c"
+  | n == 13 = "d"
+  | n == 14 = "e"
+  | n == 15 = "f"
+  | otherwise = error ("nibble out of range: " <> show n)
+
+-- | A single byte value (0-255) as two lowercase hex characters, high nibble
+-- first.
+byteToHex : Int -> Text
+byteToHex b = hexDigit (b / 16) <> hexDigit (b % 16)
+
+-- | The low byte of `n` taken modulo 256 in the range 0-255, paired with the
+-- remaining higher part (an exact floored right shift by eight bits). Phrased so
+-- it reproduces two's-complement bytes for negative `n` without ever forming a
+-- value as large as 2^64, which would overflow `Int`: the low byte is the
+-- Euclidean residue, and the rest is `(n - byte) / 256`, which divides exactly
+-- and so equals the floor regardless of sign.
+byteAndRest : Int -> (Int, Int)
+byteAndRest n =
+  let r = n % 256
+      b = if r < 0 then r + 256 else r
+  in (b, (n - b) / 256)
+
+-- | The low `width` bytes of `n`, most significant first, accumulated from the
+-- least significant end. A helper for `intToBEHex`; the caller fixes `width`.
+beBytes : Int -> Int -> [Int]
+beBytes 0 _ = []
+beBytes width n =
+  let (b, rest) = byteAndRest n
+  in beBytes (width - 1) rest ++ [b]
+
+-- | `n` as a fixed-width big-endian hex string of exactly `width` bytes
+-- (`2 * width` hex characters), two's-complement for negative `n`. This is the
+-- only integer rendering the encoder uses: an 8-byte form for `Int` and `Time`
+-- values, and a 4-byte form for the non-negative counts and lengths that frame
+-- every variable-length field. Truncates silently to `width` bytes, which is
+-- exact for every value the standard admits (an `Int` fits in eight bytes, a
+-- count or byte length never approaches four bytes).
+intToBEHex : Int -> Int -> Text
+intToBEHex width n = T.implode (map byteToHex (beBytes width n))
+
+-- | A four-byte big-endian count or byte length, the frame in front of every
+-- variable-length field (text bytes, list elements, map entries). Fixed width so
+-- a decoder reads it without a terminator, which is what lets free text appear in
+-- a value without shifting field boundaries, so the encoding needs no reserved
+-- delimiter.
+count4 : Int -> Text
+count4 = intToBEHex 4
+
+-- | The number of UTF-8 bytes in `s`. `toHex` hex-encodes the UTF-8 bytes of the
+-- text, so the length of that hex string halved is the byte count, with no need
+-- for a separate UTF-8 length builtin.
+utf8ByteLen : Text -> Int
+utf8ByteLen s = T.length (toHex s) / 2
+
+-- | A length-prefixed text field: a four-byte big-endian UTF-8 byte count
+-- followed by the UTF-8 bytes themselves, all hex. The byte count lets a decoder
+-- take exactly the field's bytes, so the text may contain any character,
+-- including one the encoding uses structurally, without ambiguity. Map keys are
+-- encoded in this same form, since a key is always text and carries no type tag.
+lp : Text -> Text
+lp s = count4 (utf8ByteLen s) <> toHex s
+
+-- | The canonical encoding of a single value: a one-byte type tag followed by the
+-- value's body, hex throughout. The tags are
+-- 0x01 `AVBool`, 0x02 `AVInt`, 0x03 `AVDecimal`, 0x04 `AVTime`, 0x07 `AVText`,
+-- 0x0a `AVList`, 0x0b `AVMap`, aligned with Canton's external-signing
+-- HashingSchemeV2 table where the types coincide and kept distinct from each
+-- other. The bodies are:
+--
+-- * `AVBool` a single byte, 0x00 false or 0x01 true.
+-- * `AVInt` the eight-byte big-endian two's-complement integer.
+-- * `AVTime` the eight-byte big-endian millisecond count from `timeToMillis`,
+--   never sub-millisecond.
+-- * `AVDecimal` the length-prefixed text of `show`, which renders a `Decimal`
+--   (a `Numeric 10`) in its shortest exact decimal form with at least one
+--   fractional digit and a leading "-" for negatives, the same rendering the
+--   quote codec uses for a price; it is the one scalar carried as text, as Canton
+--   also does, because a decimal has no fixed-width binary form here.
+-- * `AVText` the length-prefixed UTF-8 bytes.
+-- * `AVList` a four-byte big-endian element count followed by each element's own
+--   tagged encoding in order.
+-- * `AVMap` a four-byte big-endian entry count followed by, for each entry in
+--   ascending key order, the length-prefixed key bytes (no tag) then the value's
+--   tagged encoding.
+--
+-- Map entries are emitted in ascending key order so a payload's bytes do not
+-- depend on the order fields were inserted. The order is `DA.TextMap.toList`'s
+-- ascending order, which sorts keys by Unicode code point; UTF-8 byte
+-- lexicographic order coincides with code-point order, so this is the
+-- raw-byte order an off-ledger encoder reproduces by sorting the UTF-8 keys
+-- (shorter prefix first), with no locale, normalization, or UTF-16 reordering.
+encodeAnyValue : AnyValue -> Text
+encodeAnyValue (AVBool b)    = "01" <> (if b then "01" else "00")
+encodeAnyValue (AVInt n)     = "02" <> intToBEHex 8 n
+encodeAnyValue (AVDecimal d) = "03" <> lp (show d)
+encodeAnyValue (AVTime t)    = "04" <> intToBEHex 8 (timeToMillis t)
+encodeAnyValue (AVText s)    = "07" <> lp s
+encodeAnyValue (AVList xs)   =
+  "0a" <> count4 (length xs) <> T.implode (map encodeAnyValue xs)
+encodeAnyValue (AVMap m)     =
+  let entries = TM.toList m
+      encodeEntry (k, v) = lp k <> encodeAnyValue v
+  in "0b" <> count4 (length entries) <> T.implode (map encodeEntry entries)
+
+-- | The canonical bytes a producer signs and `DataPointVerifier_Verify` rebuilds,
+-- hex-encoded. The role `toHex (canonicalQuoteText p)` plays for the quote codec:
+-- the result is already an even-length hex string, so it is passed straight to
+-- the SHA-256 and secp256k1 builtins. The layout is a fixed-arity envelope, in
+-- order: the eight-byte big-endian `publishedAt` millis, the eight-byte
+-- big-endian `expiresAt` millis, the length-prefixed `schemaVersion`, and then
+-- the payload as a tagged `AVMap`. The envelope's three leading fields are
+-- fixed-position and so need no tag or terminator; the payload is encoded through
+-- the recursive `AVMap` path with its tag, so the whole encoding is one
+-- self-describing, length-framed byte string. It carries no version or domain
+-- prefix: the signature is bound to a single verifier holding a single key, and
+-- the structural distinctness of this layout from the quote codec is what keeps
+-- the two from being confused, so a prefix would add nothing the deployment does
+-- not already give.
+canonicalDataPointEncode : SignedDataPoint -> Text
+canonicalDataPointEncode p =
+     intToBEHex 8 (timeToMillis p.publishedAt)
+  <> intToBEHex 8 (timeToMillis p.expiresAt)
+  <> lp p.schemaVersion
+  <> encodeAnyValue (AVMap p.values)
+
+-- | The digest the producer's signature commits to: the SHA-256 of the canonical
+-- encoding, hex-encoded. Used only as the `canonicalHash` evidence on a
+-- `VerifiedDataPoint`; the signature check itself lets the secp256k1 builtin hash
+-- the message internally. The encoding is already hex, so unlike the quote codec
+-- there is no separate `toHex` step.
+dataPointCanonicalHash : SignedDataPoint -> Text
+dataPointCanonicalHash p = sha256 (canonicalDataPointEncode p)
+
+-- | Whether `signature` is a valid producer signature over `payload`'s canonical
+-- encoding under `publicKey`. The secp256k1 builtin SHA-256s the message argument
+-- internally, so the message passed is the hex canonical encoding, matching a
+-- signature produced over the SHA-256 of that same hex.
+dataPointSignatureValid : Text -> SignedDataPoint -> Text -> Bool
+dataPointSignatureValid publicKey payload signature =
+  secp256k1 signature (canonicalDataPointEncode payload) publicKey
+
+-- | The signature-verifier interface for data points. A producer implements it
+-- on a template it signs as a Daml party (the disclosed verifier contract); a
+-- consumer obtains that contract through explicit disclosure and reads
+-- authenticated data points through `DataPointVerifier_Verify`, depending only on
+-- this package and never on the producer's. A breaking change to the verification
+-- policy or the encoding is a new `-v2` package, since interface definitions
+-- cannot be smart-contract-upgraded.
+interface DataPointVerifier where
+  viewtype DataPointVerifierView
+
+  -- | Authenticate an off-ledger-signed data point and return it as a
+  -- `VerifiedDataPoint`, without writing anything to the ledger. The choice is
+  -- pure: it neither creates nor archives a contract, so the verifier is reusable
+  -- and contention-free, and the result is consumed in the caller's own
+  -- transaction. It checks, in order, that the signed window is well-formed
+  -- (`publishedAt` at or before `expiresAt`), that the payload has not expired
+  -- (the sole replay defence), and that the signature is valid under the
+  -- verifier's resident public key, aborting at the first failure with a
+  -- deterministic message. The well-formedness check rejects a payload that could
+  -- never have a live window before the time read, so an ill-formed window fails
+  -- on its own message rather than as an incidental expiry. Unlike the quote
+  -- verifier the encoding needs no delimiter guard, since every variable-length
+  -- field is length-prefixed and free text never shifts a field boundary.
+  -- Confirming the data point is for an expected feed and schema is the consumer's
+  -- responsibility: the standard authenticates the signer, not the payload's
+  -- identity.
+  nonconsuming choice DataPointVerifier_Verify : VerifiedDataPoint
+    with
+      actor : Party
+        -- ^ The party verifying the data point, and the sole controller of the
+        -- choice. Self-authorizes the read: a submitter cannot verify on behalf
+        -- of a party it cannot act as.
+      payload : SignedDataPoint
+        -- ^ The reconstructed record the producer signed off-ledger.
+      signature : Text
+        -- ^ The producer's signature over `payload`'s canonical encoding,
+        -- hex-encoded DER ECDSA.
+    controller actor
+    do
+      assertMsg "published after expiry" (payload.publishedAt <= payload.expiresAt)
+      now <- getTime
+      assertMsg "payload expired" (now <= payload.expiresAt)
+      let v = view this
+      assertMsg "invalid signature" (dataPointSignatureValid v.publicKey payload signature)
+      pure VerifiedDataPoint with
+        distributor   = v.oracle
+        publishedAt   = payload.publishedAt
+        schemaVersion = payload.schemaVersion
+        values        = payload.values
+        canonicalHash = dataPointCanonicalHash payload
+        signature     = signature
+        publicKey     = v.publicKey

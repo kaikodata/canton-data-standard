@@ -15,10 +15,11 @@ import qualified DA.TextMap as TM
 -- constituents is expressible. The Data Standard, not individual producers,
 -- governs which constructors exist.
 --
--- Signature-based delivery reconstructs payload bytes on-ledger, so every value
--- has a single canonical serialization. Map keys are serialized in a fixed
--- sorted order, so the same payload always produces the same bytes regardless
--- of the order in which fields were inserted.
+-- The set is closed and standard-governed so that any value admits a single
+-- canonical byte serialization, the property the signature-based verifier relies
+-- on when it reconstructs a payload on-ledger to check a producer's signature. The
+-- DataPointVerifier package defines that encoding; contract-based (push) delivery
+-- needs none, since the ledger serializes the payload itself.
 data AnyValue
   = AVInt Int
   | AVDecimal Decimal

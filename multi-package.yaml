@@ -10,6 +10,8 @@ packages:
 - ./interfaces/canton-data-standard-quote-v1
 - ./interfaces/canton-data-standard-quote-verifier-v1
 - ./interfaces/canton-data-standard-paid-quote-verifier-v1
+- ./interfaces/canton-data-standard-datapoint-verifier-v1
+- ./interfaces/canton-data-standard-paid-datapoint-verifier-v1
 - ./examples/datapoint-producer
 - ./examples/datapoint-consumer
 - ./examples/quote-producer
@@ -21,6 +23,10 @@ packages:
 - ./examples/verifier-consumer
 - ./examples/paid-verifier-producer
 - ./examples/paid-verifier-consumer
+- ./examples/datapoint-verifier-producer
+- ./examples/datapoint-verifier-consumer
+- ./examples/paid-datapoint-verifier-producer
+- ./examples/paid-datapoint-verifier-consumer
 - ./examples/test-token-registry
 - ./tests
 - ./tests-crypto

@@ -1,0 +1,336 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The pay-as-you-go half of the data point signature-verifier standard. Where
+-- `DataStandard.DataPointVerifierV1` authenticates an off-ledger-signed data
+-- point and writes nothing, this interface authenticates the same kind of payload
+-- and, in the same transaction, settles a per-call fee to a recipient the
+-- verifier pins. It is the data point analogue of
+-- `DataStandard.PaidQuoteVerifierV1`: a producer signs a data point together with
+-- the price of verifying it; a client materializes the signed record, supplies
+-- the holdings to pay with, and hands both to
+-- `PaidDataPointVerifier_VerifyAndPay`, receiving the same `VerifiedDataPoint` a
+-- free verifier returns once the fee has settled.
+--
+-- The fee is moved by a single direct Canton Token Standard transfer the caller
+-- authorizes alone: the caller is the transfer's sender, and the recipient is the
+-- verifier's pinned `payee`. The payee is also signed into the payload, and
+-- `PaidDataPointVerifier_VerifyAndPay` rejects the call unless the signed payee
+-- equals the verifier's pinned one. That binding is what stops a substitute
+-- verifier carrying the producer's public key but a different payee from
+-- replaying a genuine signature to redirect the fee to itself: the producer's key
+-- is public, so anyone can stand up such a verifier, but only a payload the
+-- producer signed for this payee settles through it. The payee may be a treasury
+-- distinct from the signing oracle. A transfer left pending or failed aborts the
+-- whole verification, so a consumer never pays for a data point that does not
+-- verify. The transfer factory is caller-supplied, so on-ledger the choice
+-- confirms a settlement was reported, completion together with a non-empty set of
+-- credited holdings, rather than proving funds moved; resistance to a deliberate
+-- fee-skip rests on package vetting, as it does for the Token Standard transfer
+-- itself.
+module DataStandard.PaidDataPointVerifierV1 where
+
+import DataStandard.DataPointVerifierV1
+  ( SignedDataPoint(..)
+  , VerifiedDataPoint(..)
+  , canonicalDataPointEncode
+  , lp
+  )
+import DataStandard.Utils (Values)
+
+import DA.Crypto.Text (secp256k1, sha256)
+
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
+import Splice.Api.Token.MetadataV1 (ExtraArgs(..))
+import Splice.Api.Token.TransferInstructionV1
+  ( Transfer(..)
+  , TransferFactory
+  , TransferFactory_Transfer(..)
+  , TransferInstructionResult_Output(..)
+  )
+
+-- | The per-call price the producer signs into every paid payload. Because the
+-- cost is covered by the producer's signature, a payload's fee and the instrument
+-- it is denominated in cannot be altered without invalidating that signature, so
+-- a client cannot be made to pay more, or in the wrong asset, than the producer
+-- quoted. Defined identically to the paid quote verifier's `Cost`; the two paid
+-- standards share the shape without depending on each other.
+data Cost = Cost with
+    fee : Decimal
+      -- ^ The amount the caller pays to verify this payload, denominated in
+      -- `instrument`. The amount of the settling transfer; MUST be strictly
+      -- positive, and `PaidDataPointVerifier_VerifyAndPay` rejects a payload whose
+      -- fee is not.
+    instrument : InstrumentId
+      -- ^ The instrument the fee is denominated in, identified by its admin and
+      -- id. The settling transfer is for this instrument, and the caller's input
+      -- holdings MUST be of it.
+  deriving (Eq, Show)
+
+-- | Everything the caller supplies to settle the fee. None of it is signed by the
+-- producer: the producer signs only what the fee is (`Cost`), never how it is
+-- paid. The caller chooses the factory, the holdings to spend, and the
+-- registry-supplied context, so the same signed payload can be paid by any client
+-- holding the instrument. Defined identically to the paid quote verifier's
+-- `PaymentArgs`.
+data PaymentArgs = PaymentArgs with
+    transferFactoryCid : ContractId TransferFactory
+      -- ^ The Canton Token Standard transfer factory for the fee instrument's
+      -- registry. The caller exercises `TransferFactory_Transfer` on it; obtained
+      -- through explicit disclosure when the caller is not a stakeholder of it.
+    inputHoldingCids : [ContractId Holding]
+      -- ^ The caller's holdings to fund the fee from. Passed through to the
+      -- transfer unchanged; the registry archives them, so naming them lets the
+      -- caller use deliberate contention to prevent paying for the same call
+      -- twice. MUST be non-empty and owned by the caller.
+    context : ExtraArgs
+      -- ^ The registry-supplied choice context and metadata, threaded through to
+      -- the transfer unchanged. Carries the receive-side consent (for example the
+      -- payee's standing preapproval) the registry needs to settle directly.
+  deriving (Eq, Show)
+
+-- | The record a client reconstructs and hands to
+-- `PaidDataPointVerifier_VerifyAndPay`: the exact set of fields the producer
+-- signed off-ledger. It is the free verifier's payload plus the `Cost` and the
+-- `payee`, so the signature commits to the price of the call and its recipient as
+-- well as the data point. The signature travels beside it as a
+-- `PaidDataPointVerifier_VerifyAndPay` argument, since a signature over these
+-- fields cannot also cover itself.
+data PaidSignedDataPoint = PaidSignedDataPoint with
+    publishedAt : Time
+      -- ^ When the producer produced and signed the data point. Becomes the
+      -- `publishedAt` of the returned `VerifiedDataPoint`; a consumer uses it for
+      -- staleness checks.
+    expiresAt : Time
+      -- ^ The instant after which the payload is no longer accepted.
+      -- `PaidDataPointVerifier_VerifyAndPay` rejects a payload presented strictly
+      -- after this time and also bounds the settling transfer to it, so a captured
+      -- (payload, signature) pair stops verifying and stops being payable once it
+      -- lapses. Must be at or after `publishedAt`, since a window that ends before
+      -- it begins is never live; `PaidDataPointVerifier_VerifyAndPay` rejects such
+      -- a payload on "published after expiry" before reading the time or
+      -- attempting the fee.
+    schemaVersion : Text
+      -- ^ Version of the `values` schema, using semantic versioning. Signed by the
+      -- producer and so committed to by the signature; carried through unchanged
+      -- to the returned `VerifiedDataPoint`.
+    values : Values
+      -- ^ The data point's payload, a map of field names to tagged values. The
+      -- recursive part of the signed bytes; encoded in a fixed key-sorted order so
+      -- the same payload always produces the same bytes.
+    cost : Cost
+      -- ^ The price of verifying this payload. Signed by the producer, so it
+      -- cannot be tampered with; the fee actually settled is taken from here, not
+      -- from the caller.
+    payee : Party
+      -- ^ The recipient the producer commits the fee to. Signed into the payload,
+      -- so it cannot be altered after signing. `PaidDataPointVerifier_VerifyAndPay`
+      -- requires it to equal the verifier's pinned `payee` and aborts otherwise,
+      -- which is what stops a substitute verifier holding the producer's public key
+      -- from redirecting the fee: a genuine signature replayed through a verifier
+      -- with a different payee fails the cross-check. The producer sets it to the
+      -- same treasury it pins on the verifier it publishes.
+  deriving (Eq, Show)
+
+-- | The on-ledger view every `PaidDataPointVerifier` implementation exposes. It
+-- names the producer, pins both the fee recipient and the public key, and
+-- advertises the encoding constants, so the key a payload is verified with and the
+-- party a fee is paid to are fixed by the contract a consumer chose to trust,
+-- never supplied alongside the payload.
+data PaidDataPointVerifierView = PaidDataPointVerifierView with
+    oracle : Party
+      -- ^ The producer that signed the payloads this verifier accepts, and the
+      -- party that signs the verifier contract. Becomes the `distributor` of every
+      -- `VerifiedDataPoint`. Need not be the party paid the fee.
+    payee : Party
+      -- ^ The fee recipient, pinned on the verifier. The settling transfer always
+      -- credits this party. `PaidDataPointVerifier_VerifyAndPay` also requires it
+      -- to equal the payee the producer signed into the payload, so a substitute
+      -- verifier holding the producer's public key but a different payee cannot
+      -- redirect payment by replaying a genuine signature. MAY be a treasury
+      -- distinct from `oracle`.
+    publicKey : Text
+      -- ^ The producer's secp256k1 public key, hex-encoded in DER form, against
+      -- which `PaidDataPointVerifier_VerifyAndPay` checks every signature. Resident
+      -- on the contract rather than passed per call, so a caller cannot substitute
+      -- its own key.
+    hashMethod : Text
+      -- ^ The digest algorithm the signature commits to, the constant "SHA-256".
+      -- Advertised for off-ledger re-verification tooling; the on-ledger check is
+      -- fixed by this interface and does not read this field.
+    signMethod : Text
+      -- ^ The signature scheme, the constant "secp256k1". Advertised for the same
+      -- off-ledger tooling; the on-ledger check is fixed by this interface.
+    payloadCodec : Text
+      -- ^ The identifier of the canonical encoding the signature was produced over,
+      -- the constant "v1-paid-datapoint-tlv". A consumer or auditor uses it to
+      -- select the matching off-ledger encoder when reproducing the bytes.
+  deriving (Eq, Show)
+
+-- | The identifier of the canonical encoding `PaidDataPointVerifier_VerifyAndPay`
+-- reproduces and checks the signature over. It extends the free verifier's
+-- "v1-datapoint-tlv" with the cost and the fee payee, so it is a distinct codec
+-- with its own identifier; a producer's off-ledger signer must encode paid
+-- payloads with the matching algorithm, including the payee.
+paidDataPointCodecId : Text
+paidDataPointCodecId = "v1-paid-datapoint-tlv"
+
+-- | Project a paid payload onto the free verifier's payload so the shared
+-- canonical prefix is produced by the free verifier's encoder rather than
+-- duplicated here. Internal to the codec; the cost and payee are carried
+-- separately.
+toFreeDataPoint : PaidSignedDataPoint -> SignedDataPoint
+toFreeDataPoint p = SignedDataPoint with
+  publishedAt = p.publishedAt
+  expiresAt = p.expiresAt
+  schemaVersion = p.schemaVersion
+  values = p.values
+
+-- | The canonical encoding of a `Cost`, hex: the fee as a length-prefixed text of
+-- `show` (the same decimal rendering the free codec uses for an `AVDecimal`), then
+-- the instrument's admin party as length-prefixed `partyToText`, then the
+-- instrument id as length-prefixed UTF-8 bytes. Every field is length-prefixed, so
+-- the instrument id may carry any character without shifting a field boundary,
+-- and the codec needs no reserved delimiter the way the quote codec did. The admin
+-- party is rendered with `partyToText` so the encoding is stable across
+-- participants.
+encodeCost : Cost -> Text
+encodeCost c =
+     lp (show c.fee)
+  <> lp (partyToText c.instrument.admin)
+  <> lp c.instrument.id
+
+-- | The canonical encoding of the fee payee, hex: the party as length-prefixed
+-- `partyToText`, mirroring how `encodeCost` renders the instrument admin.
+-- `partyToText` makes the encoding stable across participants.
+encodePayee : Party -> Text
+encodePayee payee = lp (partyToText payee)
+
+-- | The canonical bytes a producer signs for a paid payload and
+-- `PaidDataPointVerifier_VerifyAndPay` rebuilds, hex-encoded. It is the free
+-- verifier's `canonicalDataPointEncode` over the payload and validity window,
+-- followed by `encodeCost` over the cost, then `encodePayee` over the fee payee.
+-- The free prefix is reused verbatim so the two codecs share a byte-for-byte
+-- definition of the data point fields and only the cost-and-payee suffix is new.
+-- Binding the payee here is what lets `PaidDataPointVerifier_VerifyAndPay` detect a
+-- substitute verifier: a signature commits to a single payee, so it does not
+-- verify a payload presented to a verifier pinning a different one. The result is
+-- already an even-length hex string, so it is passed straight to the SHA-256 and
+-- secp256k1 builtins; the signature is computed over it, and
+-- `PaidDataPointVerifier_VerifyAndPay` rebuilds it and checks the signature
+-- against it.
+paidDataPointCanonicalEncode : PaidSignedDataPoint -> Text
+paidDataPointCanonicalEncode p =
+     canonicalDataPointEncode (toFreeDataPoint p)
+  <> encodeCost p.cost
+  <> encodePayee p.payee
+
+-- | The digest the producer's signature commits to: the SHA-256 of the canonical
+-- encoding, hex-encoded. Used only as the `canonicalHash` evidence on a
+-- `VerifiedDataPoint`; the signature check itself lets the secp256k1 builtin hash
+-- the message internally. The encoding is already hex, so there is no separate
+-- `toHex` step.
+paidDataPointCanonicalHash : PaidSignedDataPoint -> Text
+paidDataPointCanonicalHash p = sha256 (paidDataPointCanonicalEncode p)
+
+-- | Whether `signature` is a valid producer signature over `payload`'s canonical
+-- encoding under `publicKey`. The secp256k1 builtin SHA-256s the message argument
+-- internally, so the message passed is the hex canonical encoding, matching a
+-- signature produced over the SHA-256 of that same hex.
+paidDataPointSignatureValid : Text -> PaidSignedDataPoint -> Text -> Bool
+paidDataPointSignatureValid publicKey payload signature =
+  secp256k1 signature (paidDataPointCanonicalEncode payload) publicKey
+
+-- | The paid signature-verifier interface for data points. A producer implements
+-- it on a template it signs as a Daml party (the disclosed verifier contract); a
+-- consumer obtains that contract through explicit disclosure and reads
+-- authenticated data points through `PaidDataPointVerifier_VerifyAndPay`, paying
+-- the producer's fee in the same transaction, while depending only on this package
+-- and never on the producer's. A breaking change to the verification policy, the
+-- encoding, or the payment shape is a new `-v2` package, since interface
+-- definitions cannot be smart-contract-upgraded.
+interface PaidDataPointVerifier where
+  viewtype PaidDataPointVerifierView
+
+  -- | Authenticate an off-ledger-signed data point and settle its fee, returning
+  -- the data point as a `VerifiedDataPoint`. The choice's only ledger effect is the
+  -- fee transfer: it neither creates nor archives the verifier, so one verifier
+  -- serves an unbounded stream of paid calls. It proceeds in a fixed order,
+  -- aborting deterministically at the first failure: it checks the signed window is
+  -- well-formed (`publishedAt` at or before `expiresAt`), checks the payload has
+  -- not expired (the sole replay defence), checks the signature is valid under the
+  -- verifier's resident public key over the canonical encoding including the cost
+  -- and the payee, requires the payee the producer signed to equal the verifier's
+  -- pinned `payee`, rejects a non-positive `cost.fee`, then settles the fee with one
+  -- direct transfer from `actor` to the pinned payee, accepting the settlement only
+  -- if the transfer reports completion and produces at least one receiver holding,
+  -- which rejects a factory that reports success while crediting nothing. The
+  -- well-formedness check rejects a payload that could never have a live window on
+  -- its own message, before any fee is attempted. The signature authenticates the
+  -- payee, and the payee cross-check then rejects any verifier pinning a payee the
+  -- producer did not sign for, so a substitute verifier carrying the producer's
+  -- public key cannot replay a genuine signature to redirect the fee to itself.
+  -- Unlike the quote verifier the encoding needs no delimiter guard, since every
+  -- variable-length field is length-prefixed.
+  -- The choice does not authenticate the holdings any further. The transfer factory
+  -- and the holdings are caller-supplied Token Standard interface implementations
+  -- whose reported owner, instrument, and amount a registry-agnostic verifier
+  -- cannot check against a genuine registry, so on-ledger the choice confirms a
+  -- settlement was reported, not that funds moved. Resistance to a caller that
+  -- deliberately skips the fee therefore rests on the deployment vetting only honest
+  -- Token Standard implementations, the same trust the factory transfer itself
+  -- carries. Confirming the data point is for an expected feed and schema is the
+  -- consumer's responsibility: the standard authenticates the signer, not the
+  -- payload's identity.
+  nonconsuming choice PaidDataPointVerifier_VerifyAndPay : VerifiedDataPoint
+    with
+      actor : Party
+        -- ^ The party verifying the data point and paying its fee, the sole
+        -- controller of the choice and the sender of the settling transfer.
+        -- Self-authorizes both the read and the payment: a submitter cannot verify,
+        -- or spend, on behalf of a party it cannot act as.
+      payload : PaidSignedDataPoint
+        -- ^ The reconstructed record the producer signed off-ledger, including the
+        -- cost the fee is taken from.
+      signature : Text
+        -- ^ The producer's signature over `payload`'s canonical encoding,
+        -- hex-encoded DER ECDSA.
+      payment : PaymentArgs
+        -- ^ The factory, holdings, and registry context the caller settles the fee
+        -- with. The recipient and amount are not taken from here; they are the
+        -- verifier's `payee` and the payload's `cost.fee`.
+    controller actor
+    do
+      assertMsg "published after expiry" (payload.publishedAt <= payload.expiresAt)
+      now <- getTime
+      assertMsg "payload expired" (now <= payload.expiresAt)
+      let v = view this
+      assertMsg "invalid signature" (paidDataPointSignatureValid v.publicKey payload signature)
+      assertMsg "payee mismatch" (v.payee == payload.payee)
+      assertMsg "cost fee must be positive" (payload.cost.fee > 0.0)
+      let transfer = Transfer with
+            sender = actor
+            receiver = v.payee
+            amount = payload.cost.fee
+            instrumentId = payload.cost.instrument
+            requestedAt = now
+            executeBefore = payload.expiresAt
+            inputHoldingCids = payment.inputHoldingCids
+            meta = payment.context.meta
+      result <- exercise payment.transferFactoryCid TransferFactory_Transfer with
+        expectedAdmin = payload.cost.instrument.admin
+        transfer
+        extraArgs = payment.context
+      case result.output of
+        TransferInstructionResult_Completed receiverHoldingCids ->
+          assertMsg "fee settlement produced no receiver holdings"
+            (not (null receiverHoldingCids))
+        _ -> abort "fee did not settle in one step"
+      pure VerifiedDataPoint with
+        distributor   = v.oracle
+        publishedAt   = payload.publishedAt
+        schemaVersion = payload.schemaVersion
+        values        = payload.values
+        canonicalHash = paidDataPointCanonicalHash payload
+        signature     = signature
+        publicKey     = v.publicKey

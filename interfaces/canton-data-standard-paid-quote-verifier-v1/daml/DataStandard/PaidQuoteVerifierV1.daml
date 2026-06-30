@@ -157,7 +157,7 @@ paidQuoteCodecId : Text
 paidQuoteCodecId = "v1-paid-quote-concat"
 
 -- | The canonical rendering of a `Cost`: the fee via Daml's `show` for `Decimal`
--- (ten fractional digits at full scale, like the quote price), then the
+-- (its shortest exact form, like the quote price), then the
 -- instrument's admin party and id, each followed by a "|"
 -- delimiter. The admin party is rendered with `partyToText` so the encoding is
 -- stable across participants. Appended after the free quote fields, it extends
