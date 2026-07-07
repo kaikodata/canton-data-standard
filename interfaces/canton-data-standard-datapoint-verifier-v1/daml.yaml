@@ -1,12 +1,13 @@
 sdk-version: 3.4.11
 name: canton-data-standard-datapoint-verifier-v1
 source: daml
-version: 0.1.0
+version: 0.1.1
 dependencies:
   - daml-prim
   - daml-stdlib
 data-dependencies:
-  - ../canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.0.dar
+  - ../canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.1.dar
+  - ../canton-data-standard-datapoint-verifier-audit-v1/.daml/dist/canton-data-standard-datapoint-verifier-audit-v1-0.1.1.dar
 build-options:
   - --ghc-option=-Wunused-binds
   - --ghc-option=-Wunused-matches

@@ -1,5 +1,5 @@
 sdk-version: 3.4.11
-name: canton-data-standard-quote-v1
+name: canton-data-standard-datapoint-verifier-audit-v1
 source: daml
 version: 0.1.1
 dependencies:
@@ -11,3 +11,4 @@ build-options:
   - --ghc-option=-Wunused-binds
   - --ghc-option=-Wunused-matches
   - --target=2.1
+  - -Wno-crypto-text-is-alpha

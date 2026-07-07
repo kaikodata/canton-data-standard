@@ -3,9 +3,9 @@
 
 -- | The pay-as-you-go half of the data point signature-verifier standard. Where
 -- `DataStandard.DataPointVerifierV1` authenticates an off-ledger-signed data
--- point and writes nothing, this interface authenticates the same kind of payload
--- and, in the same transaction, settles a per-call fee to a recipient the
--- verifier pins. It is the data point analogue of
+-- point for free (writing only its audit record), this interface authenticates the
+-- same kind of payload and, in the same transaction, settles a per-call fee to a
+-- recipient the verifier pins. It is the data point analogue of
 -- `DataStandard.PaidQuoteVerifierV1`: a producer signs a data point together with
 -- the price of verifying it; a client materializes the signed record, supplies
 -- the holdings to pay with, and hands both to
@@ -36,7 +36,8 @@ import DataStandard.DataPointVerifierV1
   , canonicalDataPointEncode
   , lp
   )
-import DataStandard.Utils (Values)
+import DataStandard.PaidDataPointVerifierAuditV1 (AuditRecord(..))
+import DataStandard.Utils (Values, VerificationAudit(..))
 
 import DA.Crypto.Text (secp256k1, sha256)
 
@@ -253,9 +254,10 @@ interface PaidDataPointVerifier where
   viewtype PaidDataPointVerifierView
 
   -- | Authenticate an off-ledger-signed data point and settle its fee, returning
-  -- the data point as a `VerifiedDataPoint`. The choice's only ledger effect is the
-  -- fee transfer: it neither creates nor archives the verifier, so one verifier
-  -- serves an unbounded stream of paid calls. It proceeds in a fixed order,
+  -- the data point as a `VerifiedDataPoint`. The choice's ledger effects are the
+  -- fee transfer and a durable `AuditRecord` of the verification (signed by the
+  -- producer, observed by `actor`); it neither archives nor mutates the verifier,
+  -- so one verifier serves an unbounded stream of paid calls. It proceeds in a fixed order,
   -- aborting deterministically at the first failure: it checks the signed window is
   -- well-formed (`publishedAt` at or before `expiresAt`), checks the payload has
   -- not expired (the sole replay defence), checks the signature is valid under the
@@ -326,11 +328,30 @@ interface PaidDataPointVerifier where
           assertMsg "fee settlement produced no receiver holdings"
             (not (null receiverHoldingCids))
         _ -> abort "fee did not settle in one step"
-      pure VerifiedDataPoint with
-        distributor   = v.oracle
-        publishedAt   = payload.publishedAt
+      let verified = VerifiedDataPoint with
+            distributor   = v.oracle
+            publishedAt   = payload.publishedAt
+            schemaVersion = payload.schemaVersion
+            values        = payload.values
+            canonicalHash = paidDataPointCanonicalHash payload
+            signature     = signature
+            publicKey     = v.publicKey
+      -- Record the successful paid verification as a durable audit trace, signed
+      -- by the producer and observed by the verifying party (ONC-1908). It
+      -- captures the settled payment alongside the verified data point.
+      create AuditRecord with
+        audit = VerificationAudit with
+          verifier      = actor
+          distributor   = verified.distributor
+          verifiedAt    = now
+          publishedAt   = payload.publishedAt
+          expiresAt     = payload.expiresAt
+          canonicalHash = verified.canonicalHash
+          signature     = signature
+          publicKey     = verified.publicKey
         schemaVersion = payload.schemaVersion
         values        = payload.values
-        canonicalHash = paidDataPointCanonicalHash payload
-        signature     = signature
-        publicKey     = v.publicKey
+        fee           = payload.cost.fee
+        instrument    = payload.cost.instrument
+        payee         = payload.payee
+      pure verified

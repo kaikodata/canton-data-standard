@@ -11,12 +11,14 @@
 --
 -- The verifier is a single long-lived contract holding the producer's public
 -- key. It is feed-agnostic: it authenticates the signer, not the feed, so one
--- verifier serves every feed the producer signs. The choice writes nothing to
--- the ledger, so the same contract verifies any number of payloads concurrently
--- without contention.
+-- verifier serves every feed the producer signs. The choice records each
+-- verification as a fresh `AuditRecord` contract but never archives or mutates the
+-- verifier itself, so the same contract verifies any number of payloads
+-- concurrently without contention.
 module DataStandard.QuoteVerifierV1 where
 
-import DataStandard.Utils (Quote)
+import DataStandard.QuoteVerifierAuditV1 (AuditRecord(..))
+import DataStandard.Utils (Quote, VerificationAudit(..))
 
 import DA.Crypto.Text (secp256k1, sha256, toHex)
 import DA.Date (Month(Jan), date)
@@ -74,9 +76,10 @@ data SignedPayload = SignedPayload with
       -- price is observed for. Identical in meaning to `PublishedQuoteView.quote`.
   deriving (Eq, Show)
 
--- | The in-memory result `QuoteVerifier_Verify` returns on success. It carries no contract id
--- because `QuoteVerifier_Verify` writes nothing to the ledger; a consumer uses it directly in
--- the same transaction. The leading three fields are positionally and
+-- | The in-memory result `QuoteVerifier_Verify` returns on success. It carries no
+-- contract id of its own — the durable `AuditRecord` the choice writes is a
+-- separate contract; a consumer uses this result directly in the same
+-- transaction. The leading three fields are positionally and
 -- semantically aligned with `PublishedQuoteView` (`distributor`, `publishedAt`,
 -- `quote`), so consumer code reading a verified quote is identical to code
 -- reading a pushed one. The trailing three are the evidence triple, retained so
@@ -176,10 +179,11 @@ interface QuoteVerifier where
   viewtype QuoteVerifierView
 
   -- | Authenticate an off-ledger-signed quote and return it as a
-  -- `VerifiedPayload`, without writing anything to the ledger. The choice is
-  -- pure: it neither creates nor archives a contract, so the verifier is
-  -- reusable and contention-free, and the result is consumed in the caller's own
-  -- transaction. It checks, in order, that the signed window is well-formed
+  -- `VerifiedPayload`. On success the choice creates a durable `AuditRecord` of
+  -- the verification (signed by the producer, observed by `actor`) but neither
+  -- archives nor mutates the verifier, so the verifier is reusable and
+  -- contention-free, and the result is consumed in the caller's own transaction.
+  -- It checks, in order, that the signed window is well-formed
   -- (`publishedAt` at or before `expiresAt`), that the payload has not expired
   -- (the sole replay defence), that `quote.feedId` carries no encoding delimiter
   -- (so the canonical text stays injective), and that the signature is valid
@@ -208,10 +212,24 @@ interface QuoteVerifier where
       let v = view this
       assertMsg "feedId contains the reserved delimiter" (delimiterFree payload.quote.feedId)
       assertMsg "invalid signature" (quoteSignatureValid v.publicKey payload signature)
-      pure VerifiedPayload with
-        distributor   = v.oracle
-        publishedAt   = payload.publishedAt
-        quote         = payload.quote
-        canonicalHash = quoteCanonicalHash payload
-        signature     = signature
-        publicKey     = v.publicKey
+      let verified = VerifiedPayload with
+            distributor   = v.oracle
+            publishedAt   = payload.publishedAt
+            quote         = payload.quote
+            canonicalHash = quoteCanonicalHash payload
+            signature     = signature
+            publicKey     = v.publicKey
+      -- Record the successful verification as a durable audit trace, signed by
+      -- the producer and observed by the verifying party (ONC-1908).
+      create AuditRecord with
+        audit = VerificationAudit with
+          verifier      = actor
+          distributor   = verified.distributor
+          verifiedAt    = now
+          publishedAt   = payload.publishedAt
+          expiresAt     = payload.expiresAt
+          canonicalHash = verified.canonicalHash
+          signature     = signature
+          publicKey     = verified.publicKey
+        quote = payload.quote
+      pure verified

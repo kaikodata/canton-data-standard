@@ -22,7 +22,7 @@
 module DataPointVerifierConsumer.Trading where
 
 import DataStandard.DataPointVerifierV1
-import DataStandard.Utils (lookupField)
+import DataStandard.Utils (Values, lookupField)
 
 import DA.Time (RelTime, subTime)
 
@@ -95,9 +95,16 @@ template RateSubscription
         create RecordedRate with
           subscriber, feedId
           rate
-          distributor = v.distributor
-          publishedAt = v.publishedAt
+          distributor   = v.distributor
+          publishedAt   = v.publishedAt
           schemaVersion = v.schemaVersion
+          values        = v.values
+          verifier      = subscriber
+          verifiedAt    = now
+          expiresAt     = payload.expiresAt
+          canonicalHash = v.canonicalHash
+          signature     = v.signature
+          publicKey     = v.publicKey
 
     -- | Withdraw the subscription.
     choice CancelRateSubscription : ()
@@ -107,6 +114,14 @@ template RateSubscription
 -- | The record of a recorded reference rate, capturing which producer's signed
 -- data point it came from, the feed and schema it was published under, and when
 -- the producer produced it, so a later review has the provenance.
+--
+-- The verification's own audit trace is no longer this template's concern:
+-- `DataPointVerifier_Verify` now creates a standalone
+-- `DataStandard.DataPointVerifierAuditV1.AuditRecord` (signed by the producer,
+-- observed by the verifier) in the same transaction. This record still retains the
+-- signed validity window, the full `values` payload, and the
+-- `canonicalHash`/`signature`/`publicKey` evidence beside the extracted `rate`, so
+-- the rate record alone remains self-describing.
 template RecordedRate
   with
     subscriber : Party
@@ -121,5 +136,23 @@ template RecordedRate
       -- ^ When the producer produced the data point.
     schemaVersion : Text
       -- ^ The schema version the recorded payload was published under.
+    values : Values
+      -- ^ The full verified payload, retained so the audit record can reproduce
+      -- the canonical encoding the signature committed to (the extracted `rate` is
+      -- only one field of it).
+    verifier : Party
+      -- ^ The party that verified the data point (the subscriber); recorded as the
+      -- audit record's `verifier`.
+    verifiedAt : Time
+      -- ^ The ledger time the verification succeeded, distinct from `publishedAt`.
+    expiresAt : Time
+      -- ^ The signed expiry the verifier checked; part of the canonical encoding,
+      -- retained so the audit record can reproduce it.
+    canonicalHash : Text
+      -- ^ The digest the signature committed to, from the verified result.
+    signature : Text
+      -- ^ The producer's verified signature, retained as audit evidence.
+    publicKey : Text
+      -- ^ The key the signature verified against, retained as audit evidence.
   where
     signatory subscriber

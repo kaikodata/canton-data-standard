@@ -3,21 +3,27 @@
 
 -- | A reference consumer for the Data Standard's paid data point verifier
 -- interface: the pay-as-you-go sibling of the free `datapoint-verifier-consumer`
--- example. It depends on the interface packages and on the free consumer for the
--- shared `RecordedRate` record, and names no producer's template. The workflow
--- demonstrates verify-pay-and-use in a single transaction: the subscriber supplies
--- an off-ledger-signed reference-rate data point, the choice authenticates it
--- through a disclosed `PaidDataPointVerifier`, pays the producer's per-call fee,
--- confirms the schema and in-payload feed identity, and records the rate. The
--- identity gate is the same schema-aware one the free consumer uses: a data point
--- has no top-level feed identifier, so the consumer pins the `schemaVersion` and
--- reads a known "feedId" field out of the payload `values` to confirm it received
--- the data point it meant to.
+-- example. It depends only on the interface packages and names no producer's
+-- template. The workflow demonstrates verify-pay-and-use in a single transaction:
+-- the subscriber supplies an off-ledger-signed reference-rate data point, the
+-- choice authenticates it through a disclosed `PaidDataPointVerifier`, pays the
+-- producer's per-call fee, confirms the schema and in-payload feed identity, and
+-- records the rate. The identity gate is the same schema-aware one the free
+-- consumer uses: a data point has no top-level feed identifier, so the consumer
+-- pins the `schemaVersion` and reads a known "feedId" field out of the payload
+-- `values` to confirm it received the data point it meant to.
+--
+-- Unlike the free workflow it records into its own `PaidRecordedRate` record rather
+-- than the free `RecordedRate`: the paid record additionally implements
+-- `DataStandard.PaidDataPointVerifierAuditV1.AuditRecord`, whose view carries the
+-- fee, instrument, and payee the paid verifier settled, which the free record does
+-- not.
 module PaidDataPointVerifierConsumer.Trading where
 
 import DataStandard.PaidDataPointVerifierV1
-import DataStandard.Utils (lookupField)
-import DataPointVerifierConsumer.Trading (RecordedRate(..))
+import DataStandard.Utils (Values, lookupField)
+
+import Splice.Api.Token.HoldingV1 (InstrumentId)
 
 import DA.Time (RelTime, subTime)
 
@@ -25,8 +31,8 @@ import DA.Time (RelTime, subTime)
 -- of a data point authenticated through a `PaidDataPointVerifier`, where accepting
 -- also pays the producer's per-call verification fee in the same transaction. The
 -- fee is settled by a direct token-standard transfer the subscriber authorizes
--- alone, to whatever party the verifier pins as its payee. It records into the
--- same `RecordedRate` record the free workflow produces.
+-- alone, to whatever party the verifier pins as its payee. It records into a
+-- `PaidRecordedRate` record that doubles as the paid verification's audit record.
 template PaidRateSubscription
   with
     subscriber : Party
@@ -72,7 +78,7 @@ template PaidRateSubscription
     -- distributor, staleness, schema, and identity gates all run after the fee has
     -- settled inside the verifier, so a rejection there rolls the fee back with the
     -- rest of the transaction.
-    choice RecordPaidSignedRate : ContractId RecordedRate
+    choice RecordPaidSignedRate : ContractId PaidRecordedRate
       with
         payload : PaidSignedDataPoint
           -- ^ The off-ledger-signed paid data point the subscriber materialized.
@@ -97,14 +103,73 @@ template PaidRateSubscription
         rate <- case lookupField "rate" v.values of
           Some r -> pure (r : Decimal)
           None -> abort "payload missing rate field"
-        create RecordedRate with
+        create PaidRecordedRate with
           subscriber, feedId
           rate
-          distributor = v.distributor
-          publishedAt = v.publishedAt
+          distributor   = v.distributor
+          publishedAt   = v.publishedAt
           schemaVersion = v.schemaVersion
+          values        = v.values
+          verifier      = subscriber
+          verifiedAt    = now
+          expiresAt     = payload.expiresAt
+          canonicalHash = v.canonicalHash
+          signature     = v.signature
+          publicKey     = v.publicKey
+          fee           = payload.cost.fee
+          instrument    = payload.cost.instrument
+          payee         = payload.payee
 
     -- | Withdraw the subscription.
     choice CancelPaidRateSubscription : ()
       controller subscriber
       do pure ()
+
+-- | The record of a recorded paid reference rate: the paid analogue of the free
+-- `RecordedRate`, extended with the fee the subscriber paid to verify the data
+-- point. The paid verification's own audit trace is no longer this template's
+-- concern: `PaidDataPointVerifier_VerifyAndPay` now creates a standalone
+-- `DataStandard.PaidDataPointVerifierAuditV1.AuditRecord` (signed by the producer,
+-- observed by the verifier) in the same transaction, carrying the fee, instrument,
+-- and payee it settled. This record still retains the signed validity window, the
+-- `schemaVersion`, the full `values` payload, the settled payment, and the
+-- `canonicalHash`/`signature`/`publicKey` evidence beside the extracted `rate`, so
+-- the rate record alone remains self-describing.
+template PaidRecordedRate
+  with
+    subscriber : Party
+      -- ^ The subscribing party, who also paid the verification fee.
+    feedId : Text
+      -- ^ The feed the rate is for, read from the verified payload.
+    rate : Decimal
+      -- ^ The recorded rate the producer published for the feed.
+    distributor : Party
+      -- ^ The producer whose signature authenticated the rate.
+    publishedAt : Time
+      -- ^ When the producer produced the data point.
+    schemaVersion : Text
+      -- ^ The schema version the recorded payload was published under.
+    values : Values
+      -- ^ The full verified payload, retained so the audit record can reproduce
+      -- the canonical encoding the signature committed to.
+    verifier : Party
+      -- ^ The party that verified and paid (the subscriber); the audit record's
+      -- `verifier`.
+    verifiedAt : Time
+      -- ^ The ledger time the verification and payment succeeded.
+    expiresAt : Time
+      -- ^ The signed expiry the verifier checked; part of the canonical encoding.
+    canonicalHash : Text
+      -- ^ The digest the signature committed to, from the verified result.
+    signature : Text
+      -- ^ The producer's verified signature, retained as audit evidence.
+    publicKey : Text
+      -- ^ The key the signature verified against, retained as audit evidence.
+    fee : Decimal
+      -- ^ The verification fee that settled, from the producer-signed cost.
+    instrument : InstrumentId
+      -- ^ The instrument the fee was denominated in, from the signed cost.
+    payee : Party
+      -- ^ The party the fee was credited to, matching the verifier's pinned payee.
+  where
+    signatory subscriber

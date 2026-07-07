@@ -2,9 +2,10 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 -- | The pay-as-you-go half of the signature-verifier standard. Where
--- `DataStandard.QuoteVerifierV1` authenticates an off-ledger-signed quote and
--- writes nothing, this interface authenticates the same kind of payload and, in
--- the same transaction, settles a per-call fee to a recipient the verifier pins.
+-- `DataStandard.QuoteVerifierV1` authenticates an off-ledger-signed quote for free
+-- (writing only its audit record), this interface authenticates the same kind of
+-- payload and, in the same transaction, settles a per-call fee to a recipient the
+-- verifier pins.
 -- A producer signs a quote together with the price of verifying it; a client
 -- materializes the signed record, supplies the holdings to pay with, and hands
 -- both to `PaidQuoteVerifier_VerifyAndPay`, receiving the same `VerifiedPayload` a free verifier
@@ -27,8 +28,9 @@
 -- rests on package vetting, as it does for the Token Standard transfer itself.
 module DataStandard.PaidQuoteVerifierV1 where
 
+import DataStandard.PaidQuoteVerifierAuditV1 (AuditRecord(..))
 import DataStandard.QuoteVerifierV1 (SignedPayload(..), VerifiedPayload(..), canonicalQuoteText, delimiterFree)
-import DataStandard.Utils (Quote)
+import DataStandard.Utils (Quote, VerificationAudit(..))
 
 import DA.Crypto.Text (secp256k1, sha256, toHex)
 
@@ -234,9 +236,10 @@ interface PaidQuoteVerifier where
   viewtype PaidQuoteVerifierView
 
   -- | Authenticate an off-ledger-signed quote and settle its fee, returning the
-  -- quote as a `VerifiedPayload`. The choice's only ledger effect is the fee
-  -- transfer: it neither creates nor archives the verifier, so one verifier
-  -- serves an unbounded stream of paid calls. It proceeds in a fixed order,
+  -- quote as a `VerifiedPayload`. The choice's ledger effects are the fee transfer
+  -- and a durable `AuditRecord` of the verification (signed by the producer,
+  -- observed by `actor`); it neither archives nor mutates the verifier, so one
+  -- verifier serves an unbounded stream of paid calls. It proceeds in a fixed order,
   -- aborting deterministically at the first failure: it checks the signed window
   -- is well-formed (`publishedAt` at or before `expiresAt`), checks the payload
   -- has not expired (the sole replay defence), rejects a `feedId` or instrument
@@ -309,10 +312,28 @@ interface PaidQuoteVerifier where
           assertMsg "fee settlement produced no receiver holdings"
             (not (null receiverHoldingCids))
         _ -> abort "fee did not settle in one step"
-      pure VerifiedPayload with
-        distributor   = v.oracle
-        publishedAt   = payload.publishedAt
-        quote         = payload.quote
-        canonicalHash = paidCanonicalHash payload
-        signature     = signature
-        publicKey     = v.publicKey
+      let verified = VerifiedPayload with
+            distributor   = v.oracle
+            publishedAt   = payload.publishedAt
+            quote         = payload.quote
+            canonicalHash = paidCanonicalHash payload
+            signature     = signature
+            publicKey     = v.publicKey
+      -- Record the successful paid verification as a durable audit trace, signed
+      -- by the producer and observed by the verifying party (ONC-1908). It
+      -- captures the settled payment alongside the verified quote.
+      create AuditRecord with
+        audit = VerificationAudit with
+          verifier      = actor
+          distributor   = verified.distributor
+          verifiedAt    = now
+          publishedAt   = payload.publishedAt
+          expiresAt     = payload.expiresAt
+          canonicalHash = verified.canonicalHash
+          signature     = signature
+          publicKey     = verified.publicKey
+        quote      = payload.quote
+        fee        = payload.cost.fee
+        instrument = payload.cost.instrument
+        payee      = payload.payee
+      pure verified
