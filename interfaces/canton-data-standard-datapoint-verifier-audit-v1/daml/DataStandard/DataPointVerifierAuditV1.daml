@@ -1,0 +1,77 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The audit-record half of the free data point verifier, the data point
+-- analogue of `DataStandard.QuoteVerifierAuditV1`. `DataPointVerifier_Verify`
+-- returns an in-memory `VerifiedDataPoint`; this module is the durable on-ledger
+-- trace of that verification. `AuditRecord` is a concrete template the verify
+-- choice creates when a verification succeeds, attesting "this party verified this
+-- data point under this key at this time".
+--
+-- The record carries every field the producer's signature committed to, so an
+-- auditor can reproduce the check rather than merely trust it: the shared
+-- `VerificationAudit` evidence (`DataStandard.Utils`) holds the validity window
+-- (`publishedAt`, `expiresAt`) and the `canonicalHash`/`signature`/`publicKey`
+-- triple, and the record adds the signed `schemaVersion` and `values`. From those
+-- an auditor rebuilds the `SignedDataPoint`, recomputes the canonical encoding,
+-- and re-checks the signature off-ledger. The record is signed by the producer
+-- (`audit.distributor`) and observed by the verifying party (`audit.verifier`).
+module DataStandard.DataPointVerifierAuditV1 where
+
+import DataStandard.Utils (Values, VerificationAudit)
+
+-- | The read view of an `AuditRecord` for a free data point verification: the
+-- shared `VerificationAudit` evidence plus the signed `schemaVersion` and
+-- `values`, so an auditor reading it has every field the signature committed to
+-- (the validity window from `audit`, and the schema and payload here) and can
+-- rebuild the `SignedDataPoint` to re-check the signature off-ledger without
+-- touching the producer's package.
+data DataPointAuditRecordView = DataPointAuditRecordView with
+    audit : VerificationAudit
+      -- ^ The evidence shared by every verifier's audit record: the verifier and
+      -- distributor parties, the verification and publication timestamps, the
+      -- signed `expiresAt`, and the `canonicalHash`/`signature`/`publicKey` triple.
+      -- See `VerificationAudit`.
+    schemaVersion : Text
+      -- ^ The version of the verified payload's `values` schema, copied from the
+      -- verified data point. A signed field the canonical encoding commits to.
+    values : Values
+      -- ^ The verified payload, copied from the verified data point: the map of
+      -- field names to tagged values the signature committed to. With
+      -- `schemaVersion` and the validity window in `audit` it reconstructs the full
+      -- `SignedDataPoint` the producer signed, so the canonical encoding can be
+      -- recomputed and the signature re-checked.
+  deriving (Eq, Show)
+
+-- | The audit-record template for the free data point verifier. Created by
+-- `DataPointVerifier_Verify` when a verification succeeds, turning the pure
+-- `VerifiedDataPoint` into a durable record. It is signed by the producer
+-- (`audit.distributor`, the verifier's `oracle`) — whose authority is present in
+-- the verify choice because the producer signs the verifier contract — and
+-- observed by the verifying party (`audit.verifier`, the choice's `actor`). A
+-- party granted the record through explicit disclosure reads it through
+-- `AuditRecord_Fetch`. A breaking change to the recorded evidence is a new `-v2`
+-- package.
+template AuditRecord with
+    audit : VerificationAudit
+      -- ^ The shared verification evidence. See `VerificationAudit`.
+    schemaVersion : Text
+      -- ^ The version of the verified payload's `values` schema.
+    values : Values
+      -- ^ The verified data point payload the audit record attests to.
+  where
+    signatory audit.distributor
+    observer audit.verifier
+
+    -- | Read the view from a record the caller can see. The read path for a party
+    -- that is not a stakeholder of the record: it obtains the contract through
+    -- explicit disclosure, which grants visibility but not the authority to
+    -- `fetch`, and so reads by exercising this nonconsuming choice, authorised by
+    -- the caller alone.
+    nonconsuming choice AuditRecord_Fetch : DataPointAuditRecordView
+      with
+        actor : Party
+          -- ^ The party reading the audit record, and the sole controller of the
+          -- choice.
+      controller actor
+      do pure DataPointAuditRecordView with audit, schemaVersion, values

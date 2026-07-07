@@ -2,17 +2,23 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 -- | A reference consumer for the Data Standard's paid verifier interface: the
--- pay-as-you-go sibling of the free `verifier-consumer` example. It depends on
--- the interface packages and on the free consumer for the shared
--- `VerifiedQuoteTradeSettlement` record, and names no producer's template. The
--- workflow demonstrates verify-pay-and-use in a single transaction: the buyer
--- supplies an off-ledger-signed payload, the choice authenticates it through a
--- disclosed `PaidQuoteVerifier`, pays the producer's per-call fee, confirms the
--- quote is for the expected feed, and settles the trade at the verified price.
+-- pay-as-you-go sibling of the free `verifier-consumer` example. It depends only
+-- on the interface packages and names no producer's template. The workflow
+-- demonstrates verify-pay-and-use in a single transaction: the buyer supplies an
+-- off-ledger-signed payload, the choice authenticates it through a disclosed
+-- `PaidQuoteVerifier`, pays the producer's per-call fee, confirms the quote is for
+-- the expected feed, and settles the trade at the verified price.
+--
+-- Unlike the free workflow it settles into its own `PaidVerifiedQuoteTradeSettlement`
+-- record rather than the free `VerifiedQuoteTradeSettlement`: the paid settlement
+-- additionally implements `DataStandard.PaidQuoteVerifierAuditV1.AuditRecord`, whose
+-- view carries the fee, instrument, and payee the paid verifier settled, which the
+-- free record does not.
 module PaidVerifierConsumer.Trading where
 
 import DataStandard.PaidQuoteVerifierV1
-import VerifierConsumer.Trading (VerifiedQuoteTradeSettlement(..))
+
+import Splice.Api.Token.HoldingV1 (InstrumentId)
 
 import DA.Time (RelTime, subTime)
 
@@ -20,8 +26,9 @@ import DA.Time (RelTime, subTime)
 -- of a quote authenticated through a `PaidQuoteVerifier`, where accepting also
 -- pays the producer's per-call verification fee in the same transaction. The fee
 -- is settled by a direct token-standard transfer the buyer authorizes alone, to
--- whatever party the verifier pins as its payee. It settles into the same
--- `VerifiedQuoteTradeSettlement` record the free workflow produces.
+-- whatever party the verifier pins as its payee. It settles into a
+-- `PaidVerifiedQuoteTradeSettlement` record that doubles as the paid verification's
+-- audit record.
 template PaidVerifiedQuoteTradeOffer
   with
     seller : Party
@@ -64,7 +71,7 @@ template PaidVerifiedQuoteTradeOffer
     -- `publishedAt` by `maxQuoteAge`, so an untrusted producer or a quote older
     -- than the buyer's policy aborts before settlement, and before any fee
     -- settles.
-    choice AcceptPaidVerifiedQuoteTrade : ContractId VerifiedQuoteTradeSettlement
+    choice AcceptPaidVerifiedQuoteTrade : ContractId PaidVerifiedQuoteTradeSettlement
       with
         payload : PaidSignedPayload
           -- ^ The off-ledger-signed paid quote the buyer materialized.
@@ -82,15 +89,75 @@ template PaidVerifiedQuoteTradeOffer
         assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
         assertMsg "quote published in the future" (v.publishedAt <= now)
         assertMsg "quote too stale" (subTime now v.publishedAt <= maxQuoteAge)
-        create VerifiedQuoteTradeSettlement with
+        create PaidVerifiedQuoteTradeSettlement with
           seller, buyer, feedId, quantity
-          price       = v.quote.price
-          totalAmount = v.quote.price * quantity
-          distributor = v.distributor
-          priceTime   = v.quote.priceTime
-          publishedAt = v.publishedAt
+          price         = v.quote.price
+          totalAmount   = v.quote.price * quantity
+          distributor   = v.distributor
+          priceTime     = v.quote.priceTime
+          publishedAt   = v.publishedAt
+          verifier      = buyer
+          verifiedAt    = now
+          expiresAt     = payload.expiresAt
+          canonicalHash = v.canonicalHash
+          signature     = v.signature
+          publicKey     = v.publicKey
+          fee           = payload.cost.fee
+          instrument    = payload.cost.instrument
+          payee         = payload.payee
 
     -- | Withdraw the offer.
     choice CancelPaidVerifiedQuoteOffer : ()
       controller seller
       do pure ()
+
+-- | The record of a settled paid trade: the paid analogue of the free
+-- `VerifiedQuoteTradeSettlement`, extended with the fee the buyer paid to verify
+-- the quote. The paid verification's own audit trace is no longer this template's
+-- concern: `PaidQuoteVerifier_VerifyAndPay` now creates a standalone
+-- `DataStandard.PaidQuoteVerifierAuditV1.AuditRecord` (signed by the producer,
+-- observed by the verifier) in the same transaction, carrying the fee, instrument,
+-- and payee it settled. This settlement still retains the signed validity window,
+-- the quote, the settled payment, and the `canonicalHash`/`signature`/`publicKey`
+-- evidence beside the trade, so the trade record alone remains self-describing.
+template PaidVerifiedQuoteTradeSettlement
+  with
+    seller : Party
+      -- ^ The offering party.
+    buyer : Party
+      -- ^ The accepting party, who also paid the verification fee.
+    feedId : Text
+      -- ^ The settled feed.
+    quantity : Decimal
+      -- ^ The settled quantity.
+    price : Decimal
+      -- ^ The verified price the trade settled at.
+    totalAmount : Decimal
+      -- ^ `price * quantity`, recorded so the settled total needs no recompute.
+    distributor : Party
+      -- ^ The producer whose signature authenticated the price.
+    priceTime : Time
+      -- ^ The market instant the price was observed for.
+    publishedAt : Time
+      -- ^ When the producer produced the quote.
+    verifier : Party
+      -- ^ The party that verified and paid (the buyer); the audit record's
+      -- `verifier`.
+    verifiedAt : Time
+      -- ^ The ledger time the verification and payment succeeded.
+    expiresAt : Time
+      -- ^ The signed expiry the verifier checked; part of the canonical encoding.
+    canonicalHash : Text
+      -- ^ The digest the signature committed to, from the verified result.
+    signature : Text
+      -- ^ The producer's verified signature, retained as audit evidence.
+    publicKey : Text
+      -- ^ The key the signature verified against, retained as audit evidence.
+    fee : Decimal
+      -- ^ The verification fee that settled, from the producer-signed cost.
+    instrument : InstrumentId
+      -- ^ The instrument the fee was denominated in, from the signed cost.
+    payee : Party
+      -- ^ The party the fee was credited to, matching the verifier's pinned payee.
+  where
+    signatory seller, buyer

@@ -109,6 +109,59 @@ data Quote = Quote with
       -- observation time.
   deriving (Eq, Show)
 
+-- | The evidence common to every verification an auditor asserts happened,
+-- factored out so each verifier package's `AuditRecord` view shares one
+-- definition of "what a successful verify recorded". It holds the fields the
+-- four verify choices sign in common — the validity window `publishedAt` and
+-- `expiresAt` — together with the `distributor` and the
+-- `canonicalHash`/`signature`/`publicKey` evidence triple every verified result
+-- returns, plus the two provenance fields an on-ledger record adds over an
+-- in-memory result: who verified, and when. A per-package `AuditRecord` view
+-- embeds this and appends the rest of the fields that payload's signature
+-- committed to (the quote's `feedId`/`price`/`priceTime`, the data point's
+-- `schemaVersion`/`values`, and the paid variants' fee and payee).
+--
+-- Together with the per-package fields these let an auditor reproduce the check
+-- rather than merely trust it: the embedding view carries every field the
+-- signature was computed over, so the auditor can rebuild the canonical encoding,
+-- confirm it hashes to `canonicalHash`, and re-check `signature` against
+-- `publicKey` — all off-ledger, against the named `distributor`, without the
+-- producer's package. `verifier`/`verifiedAt` name the party that obtained the
+-- result and the ledger instant it held. The record carries no contract id of its
+-- own, since a pure verify creates none.
+data VerificationAudit = VerificationAudit with
+    verifier : Party
+      -- ^ The party that exercised the verify choice (its `actor`) and thereby
+      -- obtained the verified result this record attests to. An auditor reads it
+      -- as "who verified".
+    distributor : Party
+      -- ^ The producer whose resident public key validated the signature, copied
+      -- from the verified result. Never taken from the payload, so an audit record
+      -- cannot claim a distributor the payload was not signed by.
+    verifiedAt : Time
+      -- ^ The ledger time at which the verify choice succeeded. Distinct from
+      -- `publishedAt`: when the verification held, not when the producer produced
+      -- the payload. An auditor reads it as "when verified".
+    publishedAt : Time
+      -- ^ When the producer produced and signed the payload. A signed field the
+      -- canonical encoding commits to, so it is required to reproduce the check,
+      -- and doubles as the producer's own timestamp for a staleness review.
+    expiresAt : Time
+      -- ^ The instant after which the payload was no longer accepted. The other
+      -- signed field of the validity window, likewise part of the canonical
+      -- encoding, so an auditor needs it to rebuild the signed bytes.
+    canonicalHash : Text
+      -- ^ The SHA-256 digest, hex-encoded, of the canonical encoding the
+      -- signature commits to. Pins the exact payload that was verified, so the
+      -- record is tied to one quote or data point and no other.
+    signature : Text
+      -- ^ The verified signature, hex-encoded DER ECDSA. Retained so the
+      -- assertion can be reproduced off-ledger.
+    publicKey : Text
+      -- ^ The public key the signature verified against, copied from the verifier.
+      -- Retained so re-verification needs nothing beyond this record.
+  deriving (Eq, Show)
+
 -- | Extensibility metadata carried by every Data Standard view.
 --
 -- Metadata is the channel for additive evolution: a producer attaches new

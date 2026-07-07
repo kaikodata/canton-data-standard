@@ -1,0 +1,72 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The audit-record half of the free quote verifier. `QuoteVerifier_Verify`
+-- returns an in-memory `VerifiedPayload`; this module is the durable on-ledger
+-- trace of that verification. `AuditRecord` is a concrete template the verify
+-- choice creates when a verification succeeds, attesting "this party verified this
+-- quote under this key at this time".
+--
+-- The record carries every field the producer's signature committed to, so an
+-- auditor can reproduce the check rather than merely trust it: the shared
+-- `VerificationAudit` evidence (`DataStandard.Utils`) holds the validity window
+-- (`publishedAt`, `expiresAt`) and the `canonicalHash`/`signature`/`publicKey`
+-- triple, and the record adds the signed `Quote` — its `feedId`, `price`, and
+-- `priceTime`. From those an auditor rebuilds the `SignedPayload`, recomputes the
+-- canonical encoding, and re-checks the signature off-ledger. The record is signed
+-- by the producer (`audit.distributor`) and observed by the verifying party
+-- (`audit.verifier`).
+module DataStandard.QuoteVerifierAuditV1 where
+
+import DataStandard.Utils (Quote, VerificationAudit)
+
+-- | The read view of an `AuditRecord` for a free quote verification: the shared
+-- `VerificationAudit` evidence plus the signed `Quote`, so an auditor reading it
+-- has every field the signature committed to (the validity window from `audit`,
+-- and the feed, price, and price time from `quote`) and can rebuild the
+-- `SignedPayload` to re-check the signature off-ledger without touching the
+-- producer's package.
+data QuoteAuditRecordView = QuoteAuditRecordView with
+    audit : VerificationAudit
+      -- ^ The evidence shared by every verifier's audit record: the verifier and
+      -- distributor parties, the verification and publication timestamps, the
+      -- signed `expiresAt`, and the `canonicalHash`/`signature`/`publicKey` triple.
+      -- See `VerificationAudit`.
+    quote : Quote
+      -- ^ The verified quote, copied from the verified result: the signed
+      -- `feedId`, `price`, and `priceTime`. These are the remaining fields the
+      -- canonical encoding commits to beyond the validity window in `audit`, so
+      -- with `audit` they reconstruct the full `SignedPayload` the producer signed.
+  deriving (Eq, Show)
+
+-- | The audit-record template for the free quote verifier. Created by
+-- `QuoteVerifier_Verify` when a verification succeeds, turning the pure
+-- `VerifiedPayload` into a durable record. It is signed by the producer
+-- (`audit.distributor`, the verifier's `oracle`) — whose authority is present in
+-- the verify choice because the producer signs the verifier contract the choice
+-- runs on — and observed by the verifying party (`audit.verifier`, the choice's
+-- `actor`), so both the attested producer and the party that verified can see it.
+-- A party granted the record through explicit disclosure reads it through
+-- `AuditRecord_Fetch`. A breaking change to the recorded evidence is a new `-v2`
+-- package.
+template AuditRecord with
+    audit : VerificationAudit
+      -- ^ The shared verification evidence. See `VerificationAudit`.
+    quote : Quote
+      -- ^ The verified quote the audit record attests to.
+  where
+    signatory audit.distributor
+    observer audit.verifier
+
+    -- | Read the view from a record the caller can see. The read path for a party
+    -- that is not a stakeholder of the record: it obtains the contract through
+    -- explicit disclosure, which grants visibility but not the authority to
+    -- `fetch`, and so reads by exercising this nonconsuming choice, authorised by
+    -- the caller alone.
+    nonconsuming choice AuditRecord_Fetch : QuoteAuditRecordView
+      with
+        actor : Party
+          -- ^ The party reading the audit record, and the sole controller of the
+          -- choice.
+      controller actor
+      do pure QuoteAuditRecordView with audit, quote

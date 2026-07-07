@@ -8,9 +8,13 @@ packages:
 - ./interfaces/canton-data-standard-utils-v1
 - ./interfaces/canton-data-standard-datapoint-v1
 - ./interfaces/canton-data-standard-quote-v1
+- ./interfaces/canton-data-standard-quote-verifier-audit-v1
 - ./interfaces/canton-data-standard-quote-verifier-v1
+- ./interfaces/canton-data-standard-paid-quote-verifier-audit-v1
 - ./interfaces/canton-data-standard-paid-quote-verifier-v1
+- ./interfaces/canton-data-standard-datapoint-verifier-audit-v1
 - ./interfaces/canton-data-standard-datapoint-verifier-v1
+- ./interfaces/canton-data-standard-paid-datapoint-verifier-audit-v1
 - ./interfaces/canton-data-standard-paid-datapoint-verifier-v1
 - ./examples/datapoint-producer
 - ./examples/datapoint-consumer

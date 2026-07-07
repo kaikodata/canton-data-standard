@@ -12,14 +12,16 @@
 -- It is the data point analogue of `DataStandard.QuoteVerifierV1`: same single
 -- long-lived verifier holding the producer's public key, same feed-agnostic
 -- authentication of the signer rather than the feed, same nonconsuming choice
--- that writes nothing to the ledger so one verifier serves any number of
--- payloads concurrently without contention. The payload it carries is the
+-- that records each verification as a fresh `AuditRecord` but never archives or
+-- mutates the verifier, so one verifier serves any number of payloads
+-- concurrently without contention. The payload it carries is the
 -- open key/value `Values` map of a data point rather than a fixed price quote,
 -- so its canonical encoding is the recursive, length-prefixed TLV defined here
 -- (`canonicalDataPointEncode`) rather than the quote codec's flat delimited text.
 module DataStandard.DataPointVerifierV1 where
 
-import DataStandard.Utils (AnyValue(..), Values)
+import DataStandard.DataPointVerifierAuditV1 (AuditRecord(..))
+import DataStandard.Utils (AnyValue(..), Values, VerificationAudit(..))
 
 import DA.Crypto.Text (secp256k1, sha256, toHex)
 import DA.Date (Month(Jan), date)
@@ -87,8 +89,9 @@ data SignedDataPoint = SignedDataPoint with
   deriving (Eq, Show)
 
 -- | The in-memory result `DataPointVerifier_Verify` returns on success. It
--- carries no contract id because the choice writes nothing to the ledger; a
--- consumer uses it directly in the same transaction. The leading four fields are
+-- carries no contract id of its own — the durable `AuditRecord` the choice writes
+-- is a separate contract; a consumer uses this result directly in the same
+-- transaction. The leading four fields are
 -- semantically aligned with `PublishedDataView` (`distributor`, `publishedAt`,
 -- `schemaVersion`, `values`), so consumer code reading a verified data point is
 -- identical to code reading a pushed one. It carries no `metadata` field, since
@@ -307,10 +310,11 @@ interface DataPointVerifier where
   viewtype DataPointVerifierView
 
   -- | Authenticate an off-ledger-signed data point and return it as a
-  -- `VerifiedDataPoint`, without writing anything to the ledger. The choice is
-  -- pure: it neither creates nor archives a contract, so the verifier is reusable
-  -- and contention-free, and the result is consumed in the caller's own
-  -- transaction. It checks, in order, that the signed window is well-formed
+  -- `VerifiedDataPoint`. On success the choice creates a durable `AuditRecord` of
+  -- the verification (signed by the producer, observed by `actor`) but neither
+  -- archives nor mutates the verifier, so the verifier is reusable and
+  -- contention-free, and the result is consumed in the caller's own transaction.
+  -- It checks, in order, that the signed window is well-formed
   -- (`publishedAt` at or before `expiresAt`), that the payload has not expired
   -- (the sole replay defence), and that the signature is valid under the
   -- verifier's resident public key, aborting at the first failure with a
@@ -340,11 +344,26 @@ interface DataPointVerifier where
       assertMsg "payload expired" (now <= payload.expiresAt)
       let v = view this
       assertMsg "invalid signature" (dataPointSignatureValid v.publicKey payload signature)
-      pure VerifiedDataPoint with
-        distributor   = v.oracle
-        publishedAt   = payload.publishedAt
+      let verified = VerifiedDataPoint with
+            distributor   = v.oracle
+            publishedAt   = payload.publishedAt
+            schemaVersion = payload.schemaVersion
+            values        = payload.values
+            canonicalHash = dataPointCanonicalHash payload
+            signature     = signature
+            publicKey     = v.publicKey
+      -- Record the successful verification as a durable audit trace, signed by
+      -- the producer and observed by the verifying party (ONC-1908).
+      create AuditRecord with
+        audit = VerificationAudit with
+          verifier      = actor
+          distributor   = verified.distributor
+          verifiedAt    = now
+          publishedAt   = payload.publishedAt
+          expiresAt     = payload.expiresAt
+          canonicalHash = verified.canonicalHash
+          signature     = signature
+          publicKey     = verified.publicKey
         schemaVersion = payload.schemaVersion
         values        = payload.values
-        canonicalHash = dataPointCanonicalHash payload
-        signature     = signature
-        publicKey     = v.publicKey
+      pure verified

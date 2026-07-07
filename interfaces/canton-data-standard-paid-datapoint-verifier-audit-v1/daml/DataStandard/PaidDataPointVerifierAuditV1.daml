@@ -1,0 +1,100 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The audit-record half of the paid data point verifier, the data point
+-- analogue of `DataStandard.PaidQuoteVerifierAuditV1`. Where
+-- `DataStandard.DataPointVerifierAuditV1` records a free verification,
+-- `PaidDataPointVerifier_VerifyAndPay` also settles a fee, so the record an
+-- auditor inspects must attest not only that the data point verified but that its
+-- fee was paid. `AuditRecord` is a concrete template the paid verify choice
+-- creates when a verification succeeds, turning the pure `VerifiedDataPoint` plus
+-- the settled fee into a durable record.
+--
+-- It carries every field the producer's signature committed to, so an auditor can
+-- reproduce the check: the shared `VerificationAudit` evidence
+-- (`DataStandard.Utils`) with the validity window and evidence triple, the signed
+-- `schemaVersion` and `values`, and the signed payment — the fee amount, the
+-- instrument it was denominated in, and the payee it was credited to. The payment
+-- fields are also what an auditor needs to assert the fee obligation was
+-- discharged as signed, mirroring the payee cross-check
+-- `PaidDataPointVerifier_VerifyAndPay` performs on-ledger. The record is signed by
+-- the producer (`audit.distributor`) and observed by the verifying party
+-- (`audit.verifier`).
+module DataStandard.PaidDataPointVerifierAuditV1 where
+
+import DataStandard.Utils (Values, VerificationAudit)
+
+import Splice.Api.Token.HoldingV1 (InstrumentId)
+
+-- | The read view of an `AuditRecord` for a paid data point verification. It is
+-- the free data point record's evidence, `schemaVersion`, and `values`, extended
+-- with the fee the producer signed and the choice settled, so an auditor reading
+-- it has every field the signature committed to — the validity window, schema, and
+-- payload, plus the cost and payee — and can rebuild the `PaidSignedDataPoint` to
+-- re-check the signature, while also seeing that the signed fee was paid to the
+-- signed payee.
+data PaidDataPointAuditRecordView = PaidDataPointAuditRecordView with
+    audit : VerificationAudit
+      -- ^ The evidence shared by every verifier's audit record: the verifier and
+      -- distributor parties, the verification and publication timestamps, the
+      -- signed `expiresAt`, and the `canonicalHash`/`signature`/`publicKey` triple.
+      -- See `VerificationAudit`.
+    schemaVersion : Text
+      -- ^ The version of the verified payload's `values` schema, copied from the
+      -- verified data point. A signed field the canonical encoding commits to.
+    values : Values
+      -- ^ The verified payload, copied from the verified data point: the map of
+      -- field names to tagged values the signature committed to. With
+      -- `schemaVersion` and the validity window in `audit` it reconstructs the data
+      -- point fields the producer signed.
+    fee : Decimal
+      -- ^ The fee that settled, taken from the producer-signed `Cost.fee`. Since
+      -- the fee is committed to by `audit.signature`, an auditor can confirm the
+      -- amount paid matches the amount signed.
+    instrument : InstrumentId
+      -- ^ The instrument the fee was denominated in, taken from the signed
+      -- `Cost.instrument`. Identifies the asset the settling transfer moved.
+    payee : Party
+      -- ^ The recipient the fee was credited to. Equal to both the verifier's
+      -- pinned `payee` and the payee the producer signed, since
+      -- `PaidDataPointVerifier_VerifyAndPay` requires the two to match before
+      -- settling.
+  deriving (Eq, Show)
+
+-- | The audit-record template for the paid data point verifier. Created by
+-- `PaidDataPointVerifier_VerifyAndPay` when a verification succeeds. It is signed
+-- by the producer (`audit.distributor`, the verifier's `oracle`) — whose authority
+-- is present in the verify choice because the producer signs the verifier
+-- contract — and observed by the verifying party (`audit.verifier`, the choice's
+-- `actor`). A party granted the record through explicit disclosure reads it
+-- through `AuditRecord_Fetch`. A breaking change to the recorded evidence is a new
+-- `-v2` package.
+template AuditRecord with
+    audit : VerificationAudit
+      -- ^ The shared verification evidence. See `VerificationAudit`.
+    schemaVersion : Text
+      -- ^ The version of the verified payload's `values` schema.
+    values : Values
+      -- ^ The verified data point payload the audit record attests to.
+    fee : Decimal
+      -- ^ The fee that settled, from the producer-signed `Cost.fee`.
+    instrument : InstrumentId
+      -- ^ The instrument the fee was denominated in, from the signed `Cost.instrument`.
+    payee : Party
+      -- ^ The recipient the fee was credited to.
+  where
+    signatory audit.distributor
+    observer audit.verifier
+
+    -- | Read the view from a record the caller can see. The read path for a party
+    -- that is not a stakeholder of the record: it obtains the contract through
+    -- explicit disclosure, which grants visibility but not the authority to
+    -- `fetch`, and so reads by exercising this nonconsuming choice, authorised by
+    -- the caller alone.
+    nonconsuming choice AuditRecord_Fetch : PaidDataPointAuditRecordView
+      with
+        actor : Party
+          -- ^ The party reading the audit record, and the sole controller of the
+          -- choice.
+      controller actor
+      do pure PaidDataPointAuditRecordView with audit, schemaVersion, values, fee, instrument, payee

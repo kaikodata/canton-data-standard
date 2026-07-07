@@ -73,11 +73,17 @@ template VerifiedQuoteTradeOffer
         assertMsg "quote too stale" (subTime now v.publishedAt <= maxQuoteAge)
         create VerifiedQuoteTradeSettlement with
           seller, buyer, feedId, quantity
-          price       = v.quote.price
-          totalAmount = v.quote.price * quantity
-          distributor = v.distributor
-          priceTime   = v.quote.priceTime
-          publishedAt = v.publishedAt
+          price         = v.quote.price
+          totalAmount   = v.quote.price * quantity
+          distributor   = v.distributor
+          priceTime     = v.quote.priceTime
+          publishedAt   = v.publishedAt
+          verifier      = buyer
+          verifiedAt    = now
+          expiresAt     = payload.expiresAt
+          canonicalHash = v.canonicalHash
+          signature     = v.signature
+          publicKey     = v.publicKey
 
     -- | Withdraw the offer.
     choice CancelVerifiedQuoteOffer : ()
@@ -87,6 +93,13 @@ template VerifiedQuoteTradeOffer
 -- | The record of a settled trade, capturing which producer's signed quote was
 -- used, the market time it priced (`priceTime`), and when the producer produced
 -- it (`publishedAt`), so a later staleness review has both timestamps.
+--
+-- The verification's own audit trace is no longer this template's concern:
+-- `QuoteVerifier_Verify` now creates a standalone
+-- `DataStandard.QuoteVerifierAuditV1.AuditRecord` (signed by the producer, observed
+-- by the verifier) in the same transaction. This settlement still retains the
+-- signed validity window and the `canonicalHash`/`signature`/`publicKey` evidence
+-- beside the trade, so the trade record alone remains self-describing.
 template VerifiedQuoteTradeSettlement
   with
     seller : Party
@@ -107,5 +120,19 @@ template VerifiedQuoteTradeSettlement
       -- ^ The market instant the price was observed for.
     publishedAt : Time
       -- ^ When the producer produced the quote.
+    verifier : Party
+      -- ^ The party that verified the quote (the buyer); recorded as the audit
+      -- record's `verifier`.
+    verifiedAt : Time
+      -- ^ The ledger time the verification succeeded, distinct from `publishedAt`.
+    expiresAt : Time
+      -- ^ The signed expiry the verifier checked; part of the canonical encoding,
+      -- retained so the audit record can reproduce it.
+    canonicalHash : Text
+      -- ^ The digest the signature committed to, from the verified result.
+    signature : Text
+      -- ^ The producer's verified signature, retained as audit evidence.
+    publicKey : Text
+      -- ^ The key the signature verified against, retained as audit evidence.
   where
     signatory seller, buyer
