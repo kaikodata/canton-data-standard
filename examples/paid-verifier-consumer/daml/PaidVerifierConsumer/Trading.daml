@@ -11,9 +11,11 @@
 --
 -- Unlike the free workflow it settles into its own `PaidVerifiedQuoteTradeSettlement`
 -- record rather than the free `VerifiedQuoteTradeSettlement`: the paid settlement
--- additionally implements `DataStandard.PaidQuoteVerifierAuditV1.AuditRecord`, whose
--- view carries the fee, instrument, and payee the paid verifier settled, which the
--- free record does not.
+-- additionally carries the fee, instrument, and payee the paid verifier settled,
+-- which the free record does not. The verification's producer-signed `AuditRecord`
+-- (created by the verify choice itself) holds the same evidence, but its lifetime
+-- belongs to the producer; this settlement is the buyer's own copy, under the
+-- buyer's control.
 module PaidVerifierConsumer.Trading where
 
 import DataStandard.PaidQuoteVerifierV1
@@ -27,8 +29,8 @@ import DA.Time (RelTime, subTime)
 -- pays the producer's per-call verification fee in the same transaction. The fee
 -- is settled by a direct token-standard transfer the buyer authorizes alone, to
 -- whatever party the verifier pins as its payee. It settles into a
--- `PaidVerifiedQuoteTradeSettlement` record that doubles as the paid verification's
--- audit record.
+-- `PaidVerifiedQuoteTradeSettlement` record, the buyer's own durable copy of the
+-- verified, paid-for price.
 template PaidVerifiedQuoteTradeOffer
   with
     seller : Party

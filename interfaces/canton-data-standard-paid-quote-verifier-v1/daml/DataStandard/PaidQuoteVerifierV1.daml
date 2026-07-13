@@ -320,8 +320,8 @@ interface PaidQuoteVerifier where
             signature     = signature
             publicKey     = v.publicKey
       -- Record the successful paid verification as a durable audit trace, signed
-      -- by the producer and observed by the verifying party (ONC-1908). It
-      -- captures the settled payment alongside the verified quote.
+      -- by the producer and observed by the verifying party. It captures the
+      -- settled payment alongside the verified quote.
       create AuditRecord with
         audit = VerificationAudit with
           verifier      = actor

@@ -14,10 +14,11 @@
 -- `values` to confirm it received the data point it meant to.
 --
 -- Unlike the free workflow it records into its own `PaidRecordedRate` record rather
--- than the free `RecordedRate`: the paid record additionally implements
--- `DataStandard.PaidDataPointVerifierAuditV1.AuditRecord`, whose view carries the
--- fee, instrument, and payee the paid verifier settled, which the free record does
--- not.
+-- than the free `RecordedRate`: the paid record additionally carries the fee,
+-- instrument, and payee the paid verifier settled, which the free record does not.
+-- The verification's producer-signed `AuditRecord` (created by the verify choice
+-- itself) holds the same evidence, but its lifetime belongs to the producer; this
+-- record is the subscriber's own copy, under the subscriber's control.
 module PaidDataPointVerifierConsumer.Trading where
 
 import DataStandard.PaidDataPointVerifierV1
@@ -32,7 +33,8 @@ import DA.Time (RelTime, subTime)
 -- also pays the producer's per-call verification fee in the same transaction. The
 -- fee is settled by a direct token-standard transfer the subscriber authorizes
 -- alone, to whatever party the verifier pins as its payee. It records into a
--- `PaidRecordedRate` record that doubles as the paid verification's audit record.
+-- `PaidRecordedRate` record, the subscriber's own durable copy of the verified,
+-- paid-for rate.
 template PaidRateSubscription
   with
     subscriber : Party
