@@ -127,8 +127,9 @@ data Quote = Quote with
 -- confirm it hashes to `canonicalHash`, and re-check `signature` against
 -- `publicKey` — all off-ledger, against the named `distributor`, without the
 -- producer's package. `verifier`/`verifiedAt` name the party that obtained the
--- result and the ledger instant it held. The record carries no contract id of its
--- own, since a pure verify creates none.
+-- result and the ledger instant it held. The record carries no contract ids:
+-- the producer controls an audit record's lifetime, so anything that must
+-- reference a verification binds on `canonicalHash`, never on a contract id.
 data VerificationAudit = VerificationAudit with
     verifier : Party
       -- ^ The party that exercised the verify choice (its `actor`) and thereby

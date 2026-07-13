@@ -220,7 +220,7 @@ interface QuoteVerifier where
             signature     = signature
             publicKey     = v.publicKey
       -- Record the successful verification as a durable audit trace, signed by
-      -- the producer and observed by the verifying party (ONC-1908).
+      -- the producer and observed by the verifying party.
       create AuditRecord with
         audit = VerificationAudit with
           verifier      = actor

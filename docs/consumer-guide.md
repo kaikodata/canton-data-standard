@@ -10,8 +10,8 @@ else from any provider:
 
 ```yaml
 data-dependencies:
-  - <path-to>/canton-data-standard-utils-v1-0.1.0.dar
-  - <path-to>/canton-data-standard-datapoint-v1-0.1.0.dar
+  - <path-to>/canton-data-standard-utils-v1-0.1.1.dar
+  - <path-to>/canton-data-standard-datapoint-v1-0.1.1.dar
 ```
 
 To get the DARs, clone this repository and run `dpm build --all`; they land
@@ -175,8 +175,8 @@ Depend on the verifier interface DAR, and reference the verifier as
 
 ```yaml
 data-dependencies:
-  - <path-to>/canton-data-standard-utils-v1-0.1.0.dar
-  - <path-to>/canton-data-standard-quote-verifier-v1-0.1.0.dar
+  - <path-to>/canton-data-standard-utils-v1-0.1.1.dar
+  - <path-to>/canton-data-standard-quote-verifier-v1-0.1.1.dar
 ```
 
 You obtain the verifier contract through explicit disclosure, the same as any
@@ -202,12 +202,14 @@ choice AcceptVerifiedQuoteTrade : ContractId VerifiedQuoteTradeSettlement
 The full version lives in
 [`examples/verifier-consumer`](../examples/verifier-consumer).
 
-`QuoteVerifier_Verify` writes nothing to the ledger. It checks the payload has not expired and
-that the signature is valid under the verifier's resident public key, then
-returns a `VerifiedPayload` you use in the same transaction. A bad signature or
-an expired payload aborts the whole transaction, so nothing settles against an
-unauthenticated price. Because the choice creates and archives nothing, one
-verifier serves every consumer and every quote at once, with no contention.
+`QuoteVerifier_Verify` checks the payload has not expired and that the signature
+is valid under the verifier's resident public key, then returns a
+`VerifiedPayload` you use in the same transaction. A bad signature or an expired
+payload aborts the whole transaction, so nothing settles against an
+unauthenticated price. On success the choice also writes one producer-signed
+`AuditRecord` (see [the audit record](#the-audit-record-every-verify-writes)).
+It never archives or mutates the verifier itself, so one verifier serves every
+consumer and every quote at once, with no contention.
 
 The `VerifiedPayload` you get back is field-aligned with `PublishedQuoteView`:
 its `distributor`, `publishedAt`, and `quote` carry the same meaning, so the code
@@ -223,6 +225,28 @@ feed-mismatch check above) and confirm `distributor` is a party you trust before
 settling against its price. The `expiresAt` window is the only replay defence the
 standard provides, so for a tighter staleness policy bound the age of
 `publishedAt` yourself.
+
+## The audit record every verify writes
+
+Every successful verification, on all four verifier interfaces, creates one
+`AuditRecord` contract in the same transaction: the standard's durable receipt
+that the verification happened. The producer signs it and you, the verifying
+party, observe it, so it appears in your active contracts and in your PQS with
+no extra step. It carries the full evidence the verify returned (the validity
+window, `canonicalHash`, `signature`, `publicKey`, and the verified quote or
+data point; the paid variants add the settled fee, instrument, and payee), so an
+auditor can re-check the signature off-ledger from the record alone. A party
+that is not a stakeholder reads a disclosed record through its
+`AuditRecord_Fetch` choice.
+
+Two things follow from the signatory model. The producer controls the record's
+lifetime: it can archive its audit records at any time, to prune old history for
+instance, and needs no consent from you. So treat the record as the producer's
+receipt, not as your evidence store, and keep the fields you may need later on
+your own contracts, as the reference consumers do. And never link to an audit
+record by contract id, since archival invalidates ids; when one of your records
+must reference a verification, bind on `canonicalHash`, which pins the exact
+signed payload.
 
 ## Reading a pulled quote and paying for it
 
@@ -250,8 +274,9 @@ choice AcceptPaidVerifiedQuoteTrade : ContractId VerifiedQuoteTradeSettlement
 
 The full version lives in
 [`examples/paid-verifier-consumer`](../examples/paid-verifier-consumer); it
-settles into the same `VerifiedQuoteTradeSettlement` record the free
-[`examples/verifier-consumer`](../examples/verifier-consumer) produces.
+settles into its own `PaidVerifiedQuoteTradeSettlement` record, which extends
+the free settlement with the fee, instrument, and payee that settled. The
+`AuditRecord` this path writes carries the settled payment too.
 
 `PaidQuoteVerifier_VerifyAndPay` authenticates the payload and settles the fee atomically. The fee
 amount and the asset come from the `Cost` the producer signed, not from your
@@ -282,8 +307,8 @@ never a producer's template:
 
 ```yaml
 data-dependencies:
-  - <path-to>/canton-data-standard-utils-v1-0.1.0.dar
-  - <path-to>/canton-data-standard-datapoint-verifier-v1-0.1.0.dar
+  - <path-to>/canton-data-standard-utils-v1-0.1.1.dar
+  - <path-to>/canton-data-standard-datapoint-verifier-v1-0.1.1.dar
 ```
 
 You obtain the verifier contract through explicit disclosure, reconstruct the
@@ -316,12 +341,14 @@ The full version lives in
 [`examples/datapoint-verifier-consumer`](../examples/datapoint-verifier-consumer),
 a `RateSubscription` that records a verified rate as a `RecordedRate`.
 
-`DataPointVerifier_Verify` writes nothing to the ledger. It checks the payload has
-not expired and that the signature is valid under the verifier's resident public
-key, then returns a `VerifiedDataPoint` you use in the same transaction. A bad
-signature or an expired payload aborts the whole transaction, so nothing settles
-against an unauthenticated data point. Because the choice creates and archives
-nothing, one verifier serves every consumer and every data point at once.
+`DataPointVerifier_Verify` checks the payload has not expired and that the
+signature is valid under the verifier's resident public key, then returns a
+`VerifiedDataPoint` you use in the same transaction. A bad signature or an
+expired payload aborts the whole transaction, so nothing settles against an
+unauthenticated data point. On success the choice also writes one
+producer-signed `AuditRecord`, exactly as on the quote path. It never archives
+or mutates the verifier itself, so one verifier serves every consumer and every
+data point at once.
 
 The `VerifiedDataPoint` is field-aligned with `PublishedDataView` on
 `distributor`, `publishedAt`, `schemaVersion`, and `values`, so the code that
@@ -375,9 +402,9 @@ choice AcceptPaidVerifiedDataPoint : ContractId RecordedRate
 
 The full version lives in
 [`examples/paid-datapoint-verifier-consumer`](../examples/paid-datapoint-verifier-consumer),
-a `PaidRateSubscription` that settles into the same `RecordedRate` record the free
-[`examples/datapoint-verifier-consumer`](../examples/datapoint-verifier-consumer)
-produces.
+a `PaidRateSubscription` that records into its own `PaidRecordedRate` record,
+which extends the free `RecordedRate` with the fee, instrument, and payee that
+settled. The `AuditRecord` this path writes carries the settled payment too.
 
 `PaidDataPointVerifier_VerifyAndPay` authenticates the payload and settles the fee
 atomically. The fee amount and the asset come from the `Cost` the producer signed,

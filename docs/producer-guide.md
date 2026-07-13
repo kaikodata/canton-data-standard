@@ -12,8 +12,8 @@ package.
 ```yaml
 # daml.yaml
 data-dependencies:
-  - <path-to>/canton-data-standard-utils-v1-0.1.0.dar
-  - <path-to>/canton-data-standard-datapoint-v1-0.1.0.dar
+  - <path-to>/canton-data-standard-utils-v1-0.1.1.dar
+  - <path-to>/canton-data-standard-datapoint-v1-0.1.1.dar
 ```
 
 To get the DARs, clone this repository and run `dpm build --all`; they land
@@ -186,8 +186,10 @@ the other delivery model. You sign the quote off-ledger with an ECDSA key, hand
 the signed bytes to consumers through your own channel (your API, a feed), and
 publish just one on-ledger contract that holds your public key. A consumer
 pulls a signed quote whenever it needs one and authenticates it against that
-contract. You write nothing per quote, and the verifier contract is reused for
-every quote you ever sign, on every feed.
+contract. You publish nothing per quote ahead of use; the one per-quote write is
+the producer-signed `AuditRecord` each successful verification creates inside
+the consumer's transaction (see [Audit records](#audit-records)). The verifier
+contract itself is reused for every quote you ever sign, on every feed.
 
 There are two verifier interfaces. `QuoteVerifier` authenticates a signed quote
 and returns it. `PaidQuoteVerifier` does the same and settles a per-call fee in
@@ -342,9 +344,10 @@ there is a matching pair, `DataPointVerifier` and `PaidDataPointVerifier`. They
 work the same way: you sign the data point off-ledger with an ECDSA key, hand the
 signed bytes to consumers through your own channel, and publish one on-ledger
 contract that holds your public key. A consumer pulls a signed data point and
-authenticates it against that contract through a choice that writes nothing per
-call, so one verifier serves every data point you ever sign, on every feed and
-schema.
+authenticates it against that contract through a nonconsuming choice that records
+each successful verification as a producer-signed `AuditRecord` and never mutates
+the verifier, so one verifier serves every data point you ever sign, on every
+feed and schema.
 
 You implement them the same way, with an `interface instance` on a template you
 sign as a party:
@@ -491,6 +494,26 @@ The paid data point verifier depends on the Canton Token Standard interface DARs
 in [`dependencies/`](../dependencies), referenced from your `daml.yaml` the same
 way as the standard's DARs. The reference paid producer is
 [`examples/paid-datapoint-verifier-producer`](../examples/paid-datapoint-verifier-producer).
+
+## Audit records
+
+Every successful verification through any of the four verifier interfaces
+creates one `AuditRecord` contract, signed by you and observed by the verifying
+party, inside the consumer's own transaction. Your authority for that create
+comes from the verifier contract you signed; you submit nothing per call. The
+record carries the verified payload and the evidence needed to re-check the
+signature off-ledger; the paid variants add the fee, instrument, and payee that
+settled.
+
+Because you sign every record, your participant hosts all of them, and they
+accumulate at one per verification. You are the only signatory, so you can
+archive them at any time; pruning old records is a routine batch job over your
+own contracts. If a data-licensing agreement obliges you to retain usage
+history, rely on PQS rather than the active contract set: archived records stay
+in PQS history, so you can prune the ledger and keep the trail. For billing
+reconciliation, a paid audit record and the fee transfer that paid for it always
+share one transaction, so joining them in PQS is a same-transaction lookup, and
+`canonicalHash` pins the exact payload a record attests to.
 
 ## Publication lifecycle
 
