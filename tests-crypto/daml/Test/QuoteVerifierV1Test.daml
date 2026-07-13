@@ -9,6 +9,12 @@
 -- the specific abort message so each failure is shown to be for its intended
 -- reason. The verifier-consumer workflow is exercised here too, demonstrating
 -- verify-and-use through a disclosed verifier.
+--
+-- The happy path also checks the durable `AuditRecord` the verify choice writes
+-- on success: that both the verifying party (its observer) and the producer (its
+-- signatory) see one record, and that it carries the verified quote and the
+-- signature evidence. The failure cases check that an aborted verification
+-- writes no record.
 module Test.QuoteVerifierV1Test where
 
 import DA.Assert ((===))
@@ -18,6 +24,7 @@ import DA.Time (addRelTime, hours, minutes)
 import Daml.Script
 
 import DataStandard.QuoteVerifierV1
+import qualified DataStandard.QuoteVerifierAuditV1 as Audit
 import DataStandard.Utils (Quote(..))
 import VerifierProducer.SignatureVerifier
 import VerifierConsumer.Trading
@@ -84,6 +91,23 @@ testVerifyHappyPath = do
   verified.signature      === sig
   verified.publicKey       === f.keyPair.publicKey
 
+  -- The verification wrote a durable audit record, seen by the verifying party
+  -- (its observer), carrying every field the signature committed to.
+  record <- queryOneAuditRecord f.reader
+  record.audit.verifier      === f.reader
+  record.audit.distributor   === f.oracle
+  record.audit.verifiedAt    === now
+  record.audit.publishedAt   === payload.publishedAt
+  record.audit.expiresAt     === payload.expiresAt
+  record.audit.canonicalHash === verified.canonicalHash
+  record.audit.signature     === sig
+  record.audit.publicKey     === f.keyPair.publicKey
+  record.quote               === payload.quote
+
+  -- The producer sees the same record from the signatory side.
+  producerRecord <- queryOneAuditRecord f.oracle
+  producerRecord === record
+
 -- A well-formed signature that belongs to a different payload is rejected: it
 -- is valid DER but does not match the presented payload, so the secp256k1 check
 -- returns false rather than aborting on a malformed argument.
@@ -98,6 +122,7 @@ testTamperedSignatureRejected = do
     (exerciseCmd f.verifierIf QuoteVerifier_Verify with
       actor = f.reader, payload, signature = wrongSig)
     "invalid signature"
+  assertNoAuditRecords f.oracle
 
 -- A malformed (non-DER) signature is rejected deterministically by the builtin
 -- before the signature can be checked, on its own distinct message.
@@ -137,6 +162,7 @@ testExpiredRejected = do
   submitFailsWith f.reader f.disc
     (exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload, signature = sig)
     "payload expired"
+  assertNoAuditRecords f.oracle
 
 -- The boundary instant is accepted: a payload presented exactly at expiresAt
 -- still verifies (the check is `now <= expiresAt`).
@@ -324,3 +350,20 @@ testConsumerFutureDatedQuoteRejected = do
   submitFailsWith f.reader f.disc
     (exerciseCmd offer AcceptVerifiedQuoteTrade with payload, signature = sig)
     "quote published in the future"
+
+-- | Query the single `AuditRecord` visible to `party`, failing unless there is
+-- exactly one. A successful verification writes one record, seen by both the
+-- verifying party (its observer) and the producer (its signatory).
+queryOneAuditRecord : Party -> Script Audit.AuditRecord
+queryOneAuditRecord party = do
+  records <- query @Audit.AuditRecord party
+  case records of
+    [(_, r)] -> pure r
+    _ -> abort ("expected exactly one audit record, got: " <> show (length records))
+
+-- | Assert the producer (the audit record's signatory) sees no audit record,
+-- the state after a verification that aborted before writing one.
+assertNoAuditRecords : Party -> Script ()
+assertNoAuditRecords producer = do
+  records <- query @Audit.AuditRecord producer
+  assertMsg "no audit record written for a failed verification" (null records)

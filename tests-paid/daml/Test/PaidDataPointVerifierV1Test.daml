@@ -11,6 +11,12 @@
 -- distinct from the signing oracle through the test token registry, with the
 -- treasury supplying a standing preapproval. Negative cases assert the specific
 -- abort message so each failure is shown to be for its intended reason.
+--
+-- The happy path also checks the durable `AuditRecord` the verify choice writes
+-- on success: that both the verifying party (its observer) and the producer (its
+-- signatory) see one record, and that it carries the verified schema and values,
+-- the signature evidence, and the settled fee, instrument, and payee. The
+-- failure cases check that an aborted verification writes no record.
 module Test.PaidDataPointVerifierV1Test where
 
 import DA.Assert ((===))
@@ -19,6 +25,7 @@ import qualified DA.TextMap as TM
 import Daml.Script
 
 import DataStandard.PaidDataPointVerifierV1
+import qualified DataStandard.PaidDataPointVerifierAuditV1 as Audit
 import DataStandard.Utils (Values, insertField)
 
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId(..))
@@ -176,6 +183,27 @@ testVerifyAndPayHappyPath = do
   oracleHoldings <- query @RegistryHolding f.oracle
   assertMsg "oracle (not the payee) receives no fee" (null oracleHoldings)
 
+  -- The paid verification wrote a durable audit record, seen by the verifying
+  -- party (its observer), capturing the settled payment alongside the data point.
+  record <- queryOneAuditRecord f.buyer
+  record.audit.verifier      === f.buyer
+  record.audit.distributor   === f.oracle
+  record.audit.verifiedAt    === now
+  record.audit.publishedAt   === payload.publishedAt
+  record.audit.expiresAt     === payload.expiresAt
+  record.audit.canonicalHash === verified.canonicalHash
+  record.audit.signature     === sig
+  record.audit.publicKey     === f.keyPair.publicKey
+  record.schemaVersion       === payload.schemaVersion
+  record.values              === payload.values
+  record.fee                 === payload.cost.fee
+  record.instrument          === payload.cost.instrument
+  record.payee               === payload.payee
+
+  -- The producer sees the same record from the signatory side.
+  producerRecord <- queryOneAuditRecord f.oracle
+  producerRecord === record
+
 -- A correctly-signed payload past its expiry is rejected before any payment is
 -- attempted: expiry is the sole replay defence.
 testExpiredRejected : Script ()
@@ -189,6 +217,7 @@ testExpiredRejected = do
     ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
         actor = f.buyer, payload, signature = sig, payment = paymentArgs f )
     "payload expired"
+  assertNoAuditRecords f.oracle
 
 -- A signature that does not cover the cost is rejected: the canonical encoding the
 -- signature commits to includes the cost, so signing a payload with a different
@@ -237,6 +266,7 @@ testZeroFeeRejected = do
     ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
         actor = f.buyer, payload, signature = sig, payment = paymentArgs f )
     "cost fee must be positive"
+  assertNoAuditRecords f.oracle
 
 -- The fee does not settle without the payee's standing preapproval: the registry
 -- refuses the transfer, so the choice aborts and no data point is returned.
@@ -524,3 +554,20 @@ submitFailsWithDiscsNoPreapproval f cmds = expectAbort
       )
       cmds
   )
+
+-- | Query the single `AuditRecord` visible to `party`, failing unless there is
+-- exactly one. A successful paid verification writes one record, seen by both
+-- the verifying party (its observer) and the producer (its signatory).
+queryOneAuditRecord : Party -> Script Audit.AuditRecord
+queryOneAuditRecord party = do
+  records <- query @Audit.AuditRecord party
+  case records of
+    [(_, r)] -> pure r
+    _ -> abort ("expected exactly one audit record, got: " <> show (length records))
+
+-- | Assert the producer (the audit record's signatory) sees no audit record,
+-- the state after a paid verification that aborted before writing one.
+assertNoAuditRecords : Party -> Script ()
+assertNoAuditRecords producer = do
+  records <- query @Audit.AuditRecord producer
+  assertMsg "no audit record written for a failed verification" (null records)
