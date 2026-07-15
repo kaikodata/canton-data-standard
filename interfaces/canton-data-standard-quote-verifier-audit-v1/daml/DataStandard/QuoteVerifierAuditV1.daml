@@ -4,8 +4,9 @@
 -- | The audit-record half of the free quote verifier. `QuoteVerifier_Verify`
 -- returns an in-memory `VerifiedPayload`; this module is the durable on-ledger
 -- trace of that verification. `AuditRecord` is a concrete template the verify
--- choice creates when a verification succeeds, attesting "this party verified this
--- quote under this key at this time".
+-- choice creates when a verification succeeds and the producer's
+-- `allowsAuditRecords` policy and the caller's request both opt in, attesting
+-- "this party verified this quote under this key at this time".
 --
 -- The record carries every field the producer's signature committed to, so an
 -- auditor can reproduce the check rather than merely trust it: the shared
@@ -40,7 +41,8 @@ data QuoteAuditRecordView = QuoteAuditRecordView with
   deriving (Eq, Show)
 
 -- | The audit-record template for the free quote verifier. Created by
--- `QuoteVerifier_Verify` when a verification succeeds, turning the pure
+-- `QuoteVerifier_Verify` when a verification succeeds and both the producer's
+-- audit policy and the caller's request opt in, turning the pure
 -- `VerifiedPayload` into a durable record. It is signed by the producer
 -- (`audit.distributor`, the verifier's `oracle`) — whose authority is present in
 -- the verify choice because the producer signs the verifier contract the choice

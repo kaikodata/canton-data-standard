@@ -16,9 +16,11 @@
 -- Unlike the free workflow it records into its own `PaidRecordedRate` record rather
 -- than the free `RecordedRate`: the paid record additionally carries the fee,
 -- instrument, and payee the paid verifier settled, which the free record does not.
--- The verification's producer-signed `AuditRecord` (created by the verify choice
--- itself) holds the same evidence, but its lifetime belongs to the producer; this
--- record is the subscriber's own copy, under the subscriber's control.
+-- When the producer's audit policy and this call's request agree (the subscription
+-- passes `createAuditRecord = True`), the verify choice also writes its own
+-- producer-signed `AuditRecord` holding the same evidence, but its lifetime belongs
+-- to the producer; this record is the subscriber's own copy, under the subscriber's
+-- control, and stands whether or not that record was written.
 module PaidDataPointVerifierConsumer.Trading where
 
 import DataStandard.PaidDataPointVerifierV1
@@ -93,7 +95,7 @@ template PaidRateSubscription
       do
         now <- getTime
         v <- exercise verifierCid PaidDataPointVerifier_VerifyAndPay with
-          actor = subscriber, payload, signature, payment
+          actor = subscriber, payload, signature, payment, createAuditRecord = True
         assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
         assertMsg "data point published in the future" (v.publishedAt <= now)
         assertMsg "data point too stale" (subTime now v.publishedAt <= maxAge)
@@ -130,10 +132,11 @@ template PaidRateSubscription
 -- | The record of a recorded paid reference rate: the paid analogue of the free
 -- `RecordedRate`, extended with the fee the subscriber paid to verify the data
 -- point. The paid verification's own audit trace is no longer this template's
--- concern: `PaidDataPointVerifier_VerifyAndPay` now creates a standalone
+-- concern: `PaidDataPointVerifier_VerifyAndPay` writes its own standalone
 -- `DataStandard.PaidDataPointVerifierAuditV1.AuditRecord` (signed by the producer,
 -- observed by the verifier) in the same transaction, carrying the fee, instrument,
--- and payee it settled. This record still retains the signed validity window, the
+-- and payee it settled, when the producer's audit policy and this call's request
+-- agree. This record still retains the signed validity window, the
 -- `schemaVersion`, the full `values` payload, the settled payment, and the
 -- `canonicalHash`/`signature`/`publicKey` evidence beside the extracted `rate`, so
 -- the rate record alone remains self-describing.

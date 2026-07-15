@@ -41,15 +41,21 @@ data VerifierFixture = VerifierFixture with
     disc        : Disclosure
 
 -- | Allocate parties, generate a real secp256k1 keypair, publish a verifier
--- holding the public key, and capture its disclosure.
+-- holding the public key with audit records allowed, and capture its disclosure.
 setup : Script VerifierFixture
-setup = do
+setup = setupWith True
+
+-- | As `setup`, publishing the verifier with the given `allowsAuditRecords`
+-- policy so a test can pin either side of the audit double gate.
+setupWith : Bool -> Script VerifierFixture
+setupWith allowsAuditRecords = do
   oracle  <- allocateParty "Oracle"
   reader  <- allocateParty "Reader"
   keyPair <- secp256k1generatekeypair
   verifierTpl <- submit oracle $ createCmd SignatureVerifier with
     oracle
     publicKey = keyPair.publicKey
+    allowsAuditRecords
   Some disc <- queryDisclosure oracle verifierTpl
   pure VerifierFixture with
     oracle, reader, keyPair, verifierTpl, disc
@@ -81,7 +87,7 @@ testVerifyHappyPath = do
   let payload = defaultPayload now
   sig <- signQuote f.keyPair.privateKey payload
   verified <- submit (actAs f.reader <> disclose f.disc) $
-    exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload, signature = sig
+    exerciseCmd f.verifierIf QuoteVerifier_Verify with createAuditRecord = True, actor = f.reader, payload, signature = sig
   verified.distributor    === f.oracle
   verified.quote.feedId   === "BTC/USD"
   verified.quote.price    === 65000.0
@@ -120,7 +126,7 @@ testTamperedSignatureRejected = do
   wrongSig <- signQuote f.keyPair.privateKey otherPayload
   submitFailsWith f.reader f.disc
     (exerciseCmd f.verifierIf QuoteVerifier_Verify with
-      actor = f.reader, payload, signature = wrongSig)
+      actor = f.reader, payload, signature = wrongSig, createAuditRecord = True)
     "invalid signature"
   assertNoAuditRecords f.oracle
 
@@ -133,7 +139,7 @@ testMalformedSignatureRejected = do
   let payload = defaultPayload now
   submitFailsWith f.reader f.disc
     (exerciseCmd f.verifierIf QuoteVerifier_Verify with
-      actor = f.reader, payload, signature = "00bad00signature")
+      actor = f.reader, payload, signature = "00bad00signature", createAuditRecord = True)
     "not a DER encoded hex string"
 
 -- A valid signature over one payload does not verify a payload with a mutated
@@ -147,7 +153,7 @@ testTamperedQuoteRejected = do
   sigA <- signQuote f.keyPair.privateKey payloadA
   let payloadB = payloadA with quote = (payloadA.quote with price = 99999.0)
   submitFailsWith f.reader f.disc
-    (exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload = payloadB, signature = sigA)
+    (exerciseCmd f.verifierIf QuoteVerifier_Verify with createAuditRecord = True, actor = f.reader, payload = payloadB, signature = sigA)
     "invalid signature"
 
 -- A correctly-signed payload past its expiry is rejected: expiry is the sole
@@ -160,7 +166,7 @@ testExpiredRejected = do
   sig <- signQuote f.keyPair.privateKey payload
   passTime (hours 2)                          -- move strictly past expiresAt
   submitFailsWith f.reader f.disc
-    (exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload, signature = sig)
+    (exerciseCmd f.verifierIf QuoteVerifier_Verify with createAuditRecord = True, actor = f.reader, payload, signature = sig)
     "payload expired"
   assertNoAuditRecords f.oracle
 
@@ -173,7 +179,7 @@ testExpiryBoundaryAccepted = do
   let payload = (defaultPayload now) with expiresAt = now
   sig <- signQuote f.keyPair.privateKey payload
   verified <- submit (actAs f.reader <> disclose f.disc) $
-    exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload, signature = sig
+    exerciseCmd f.verifierIf QuoteVerifier_Verify with createAuditRecord = True, actor = f.reader, payload, signature = sig
   verified.quote.feedId === "BTC/USD"
 
 -- Verifying without disclosing the verifier fails on visibility, before any
@@ -185,7 +191,7 @@ testVerifyWithoutDisclosureFails = do
   let payload = defaultPayload now
   sig <- signQuote f.keyPair.privateKey payload
   r <- trySubmit (actAs f.reader)
-    (exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload, signature = sig)
+    (exerciseCmd f.verifierIf QuoteVerifier_Verify with createAuditRecord = True, actor = f.reader, payload, signature = sig)
   case r of
     Right _ -> abort "expected a visibility failure"
     Left _  -> pure ()
@@ -201,9 +207,9 @@ testVerifierReusable = do
   s1 <- signQuote f.keyPair.privateKey p1
   s2 <- signQuote f.keyPair.privateKey p2
   _ <- submit (actAs f.reader <> disclose f.disc) $
-    exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload = p1, signature = s1
+    exerciseCmd f.verifierIf QuoteVerifier_Verify with createAuditRecord = True, actor = f.reader, payload = p1, signature = s1
   _ <- submit (actAs f.reader <> disclose f.disc) $
-    exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload = p2, signature = s2
+    exerciseCmd f.verifierIf QuoteVerifier_Verify with createAuditRecord = True, actor = f.reader, payload = p2, signature = s2
   active <- queryContractId f.oracle f.verifierTpl
   assertMsg "nonconsuming verifier stays active" (isSome active)
 
@@ -218,7 +224,7 @@ testWrongKeyRejected = do
   let payload = defaultPayload now
   sigOther <- signQuote other.privateKey payload
   submitFailsWith f.reader f.disc
-    (exerciseCmd f.verifierIf QuoteVerifier_Verify with actor = f.reader, payload, signature = sigOther)
+    (exerciseCmd f.verifierIf QuoteVerifier_Verify with createAuditRecord = True, actor = f.reader, payload, signature = sigOther)
     "invalid signature"
 
 -- End-to-end verify-and-use: the consumer workflow authenticates a signed quote
@@ -310,7 +316,7 @@ testPublishedAfterExpiryRejected = do
   sig <- signQuote f.keyPair.privateKey payload
   submitFailsWith f.reader f.disc
     (exerciseCmd f.verifierIf QuoteVerifier_Verify with
-      actor = f.reader, payload, signature = sig)
+      actor = f.reader, payload, signature = sig, createAuditRecord = True)
     "published after expiry"
 
 -- A correctly-signed payload whose feedId carries the encoding delimiter "|" is
@@ -328,7 +334,7 @@ testDelimiterInFeedIdRejected = do
   sig <- signQuote f.keyPair.privateKey payload
   submitFailsWith f.reader f.disc
     (exerciseCmd f.verifierIf QuoteVerifier_Verify with
-      actor = f.reader, payload, signature = sig)
+      actor = f.reader, payload, signature = sig, createAuditRecord = True)
     "feedId contains the reserved delimiter"
 
 -- The consumer rejects a verified quote stamped in the future. The payload has a
@@ -350,6 +356,48 @@ testConsumerFutureDatedQuoteRejected = do
   submitFailsWith f.reader f.disc
     (exerciseCmd offer AcceptVerifiedQuoteTrade with payload, signature = sig)
     "quote published in the future"
+
+-- The producer allows audit records but the caller declines: the quote still
+-- verifies and no audit record is written.
+testAuditProducerAllowsCallerDeclines : Script ()
+testAuditProducerAllowsCallerDeclines = do
+  f <- setup                                  -- allowsAuditRecords = True
+  now <- getTime
+  let payload = defaultPayload now
+  sig <- signQuote f.keyPair.privateKey payload
+  verified <- submit (actAs f.reader <> disclose f.disc) $
+    exerciseCmd f.verifierIf QuoteVerifier_Verify with
+      actor = f.reader, payload, signature = sig, createAuditRecord = False
+  verified.quote.feedId === "BTC/USD"
+  assertNoAuditRecords f.oracle
+
+-- The caller requests an audit record but the producer's policy forbids it: the
+-- quote still verifies and no audit record is written.
+testAuditProducerForbidsCallerRequests : Script ()
+testAuditProducerForbidsCallerRequests = do
+  f <- setupWith False
+  now <- getTime
+  let payload = defaultPayload now
+  sig <- signQuote f.keyPair.privateKey payload
+  verified <- submit (actAs f.reader <> disclose f.disc) $
+    exerciseCmd f.verifierIf QuoteVerifier_Verify with
+      actor = f.reader, payload, signature = sig, createAuditRecord = True
+  verified.quote.feedId === "BTC/USD"
+  assertNoAuditRecords f.oracle
+
+-- Neither the producer's policy nor the caller opts in: the quote still verifies
+-- and no audit record is written.
+testAuditNeitherOptsIn : Script ()
+testAuditNeitherOptsIn = do
+  f <- setupWith False
+  now <- getTime
+  let payload = defaultPayload now
+  sig <- signQuote f.keyPair.privateKey payload
+  verified <- submit (actAs f.reader <> disclose f.disc) $
+    exerciseCmd f.verifierIf QuoteVerifier_Verify with
+      actor = f.reader, payload, signature = sig, createAuditRecord = False
+  verified.quote.feedId === "BTC/USD"
+  assertNoAuditRecords f.oracle
 
 -- | Query the single `AuditRecord` visible to `party`, failing unless there is
 -- exactly one. A successful verification writes one record, seen by both the

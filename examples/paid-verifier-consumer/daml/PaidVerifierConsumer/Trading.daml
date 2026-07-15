@@ -12,10 +12,11 @@
 -- Unlike the free workflow it settles into its own `PaidVerifiedQuoteTradeSettlement`
 -- record rather than the free `VerifiedQuoteTradeSettlement`: the paid settlement
 -- additionally carries the fee, instrument, and payee the paid verifier settled,
--- which the free record does not. The verification's producer-signed `AuditRecord`
--- (created by the verify choice itself) holds the same evidence, but its lifetime
--- belongs to the producer; this settlement is the buyer's own copy, under the
--- buyer's control.
+-- which the free record does not. When the producer's audit policy and this call's
+-- request agree (the offer passes `createAuditRecord = True`), the verify choice
+-- also writes its own producer-signed `AuditRecord` holding the same evidence, but
+-- its lifetime belongs to the producer; this settlement is the buyer's own copy,
+-- under the buyer's control, and stands whether or not that record was written.
 module PaidVerifierConsumer.Trading where
 
 import DataStandard.PaidQuoteVerifierV1
@@ -86,7 +87,7 @@ template PaidVerifiedQuoteTradeOffer
       do
         now <- getTime
         v <- exercise verifierCid PaidQuoteVerifier_VerifyAndPay with
-          actor = buyer, payload, signature, payment
+          actor = buyer, payload, signature, payment, createAuditRecord = True
         assertMsg "feed mismatch" (v.quote.feedId == feedId)
         assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
         assertMsg "quote published in the future" (v.publishedAt <= now)
@@ -116,10 +117,11 @@ template PaidVerifiedQuoteTradeOffer
 -- | The record of a settled paid trade: the paid analogue of the free
 -- `VerifiedQuoteTradeSettlement`, extended with the fee the buyer paid to verify
 -- the quote. The paid verification's own audit trace is no longer this template's
--- concern: `PaidQuoteVerifier_VerifyAndPay` now creates a standalone
+-- concern: `PaidQuoteVerifier_VerifyAndPay` writes its own standalone
 -- `DataStandard.PaidQuoteVerifierAuditV1.AuditRecord` (signed by the producer,
 -- observed by the verifier) in the same transaction, carrying the fee, instrument,
--- and payee it settled. This settlement still retains the signed validity window,
+-- and payee it settled, when the producer's audit policy and this call's request
+-- agree. This settlement still retains the signed validity window,
 -- the quote, the settled payment, and the `canonicalHash`/`signature`/`publicKey`
 -- evidence beside the trade, so the trade record alone remains self-describing.
 template PaidVerifiedQuoteTradeSettlement

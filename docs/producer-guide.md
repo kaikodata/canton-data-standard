@@ -12,8 +12,8 @@ package.
 ```yaml
 # daml.yaml
 data-dependencies:
-  - <path-to>/canton-data-standard-utils-v1-0.1.1.dar
-  - <path-to>/canton-data-standard-datapoint-v1-0.1.1.dar
+  - <path-to>/canton-data-standard-utils-v1-0.1.2.dar
+  - <path-to>/canton-data-standard-datapoint-v1-0.1.2.dar
 ```
 
 To get the DARs, clone this repository and run `dpm build --all`; they land
@@ -186,9 +186,10 @@ the other delivery model. You sign the quote off-ledger with an ECDSA key, hand
 the signed bytes to consumers through your own channel (your API, a feed), and
 publish just one on-ledger contract that holds your public key. A consumer
 pulls a signed quote whenever it needs one and authenticates it against that
-contract. You publish nothing per quote ahead of use; the one per-quote write is
-the producer-signed `AuditRecord` each successful verification creates inside
-the consumer's transaction (see [Audit records](#audit-records)). The verifier
+contract. You publish nothing per quote ahead of use; the one possible per-quote
+write is the producer-signed `AuditRecord` a verification creates inside the
+consumer's transaction when your audit policy and the caller both opt in (see
+[Audit records](#audit-records)). The verifier
 contract itself is reused for every quote you ever sign, on every feed.
 
 There are two verifier interfaces. `QuoteVerifier` authenticates a signed quote
@@ -201,8 +202,9 @@ import DataStandard.QuoteVerifierV1
 
 template SignatureVerifier
   with
-    oracle    : Party
-    publicKey : Text
+    oracle             : Party
+    publicKey          : Text
+    allowsAuditRecords : Bool
   where
     signatory oracle
 
@@ -213,6 +215,7 @@ template SignatureVerifier
         hashMethod   = "SHA-256"
         signMethod   = "secp256k1"
         payloadCodec = quoteCodecId
+        allowsAuditRecords
 ```
 
 The full version, including a key-rotation choice, lives in
@@ -229,6 +232,7 @@ The view, field by field:
 | `hashMethod` | The digest the signature commits to, the constant `"SHA-256"`. Advertised for off-ledger tooling; the on-ledger check is fixed by the interface. |
 | `signMethod` | The signature scheme, the constant `"secp256k1"`. Advertised the same way. |
 | `payloadCodec` | The identifier of the canonical encoding you signed over: `quoteCodecId` (`"v1-quote-concat"`) for the free verifier, `paidQuoteCodecId` (`"v1-paid-quote-concat"`) for the paid one. A consumer reads it to select the matching off-ledger encoder. |
+| `allowsAuditRecords` | Your standing audit policy. When true, a verification writes a producer-signed `AuditRecord` if the caller also requests one; when false, no record is ever written, however the caller asks. Public on the view, so a consumer that needs receipts checks it before relying on them. |
 
 ### Signing a quote
 
@@ -297,9 +301,10 @@ import DataStandard.PaidQuoteVerifierV1
 
 template PaidSignatureVerifier
   with
-    oracle    : Party
-    payee     : Party
-    publicKey : Text
+    oracle             : Party
+    payee              : Party
+    publicKey          : Text
+    allowsAuditRecords : Bool
   where
     signatory oracle
 
@@ -311,6 +316,7 @@ template PaidSignatureVerifier
         hashMethod   = "SHA-256"
         signMethod   = "secp256k1"
         payloadCodec = paidQuoteCodecId
+        allowsAuditRecords
 ```
 
 The fee is settled by a single direct Canton Token Standard transfer that the
@@ -344,10 +350,10 @@ there is a matching pair, `DataPointVerifier` and `PaidDataPointVerifier`. They
 work the same way: you sign the data point off-ledger with an ECDSA key, hand the
 signed bytes to consumers through your own channel, and publish one on-ledger
 contract that holds your public key. A consumer pulls a signed data point and
-authenticates it against that contract through a nonconsuming choice that records
-each successful verification as a producer-signed `AuditRecord` and never mutates
-the verifier, so one verifier serves every data point you ever sign, on every
-feed and schema.
+authenticates it against that contract through a nonconsuming choice that can
+record a successful verification as a producer-signed `AuditRecord` and never
+mutates the verifier, so one verifier serves every data point you ever sign, on
+every feed and schema.
 
 You implement them the same way, with an `interface instance` on a template you
 sign as a party:
@@ -357,8 +363,9 @@ import DataStandard.DataPointVerifierV1
 
 template DataPointSignatureVerifier
   with
-    oracle    : Party
-    publicKey : Text
+    oracle             : Party
+    publicKey          : Text
+    allowsAuditRecords : Bool
   where
     signatory oracle
 
@@ -369,6 +376,7 @@ template DataPointSignatureVerifier
         hashMethod   = "SHA-256"
         signMethod   = "secp256k1"
         payloadCodec = dataPointCodecId
+        allowsAuditRecords
 ```
 
 The full version, with a key-rotation choice, lives in
@@ -385,6 +393,7 @@ The view, field by field:
 | `hashMethod` | The digest the signature commits to, the constant `"SHA-256"`. Advertised for off-ledger tooling; the on-ledger check is fixed by the interface. |
 | `signMethod` | The signature scheme, the constant `"secp256k1"`. Advertised the same way. |
 | `payloadCodec` | The identifier of the canonical encoding you signed over: `dataPointCodecId` (`"v1-datapoint-tlv"`) for the free verifier, `paidDataPointCodecId` (`"v1-paid-datapoint-tlv"`) for the paid one. A consumer reads it to select the matching off-ledger encoder. |
+| `allowsAuditRecords` | Your standing audit policy. When true, a verification writes a producer-signed `AuditRecord` if the caller also requests one; when false, no record is ever written, however the caller asks. Public on the view, so a consumer that needs receipts checks it before relying on them. |
 
 The signed field set is `publishedAt`, `expiresAt`, `schemaVersion`, and `values`.
 `schemaVersion` is signed, so a consumer can trust it to interpret `values`. The
@@ -459,9 +468,10 @@ import DataStandard.PaidDataPointVerifierV1
 
 template PaidDataPointSignatureVerifier
   with
-    oracle    : Party
-    payee     : Party
-    publicKey : Text
+    oracle             : Party
+    payee              : Party
+    publicKey          : Text
+    allowsAuditRecords : Bool
   where
     signatory oracle
 
@@ -473,6 +483,7 @@ template PaidDataPointSignatureVerifier
         hashMethod   = "SHA-256"
         signMethod   = "secp256k1"
         payloadCodec = paidDataPointCodecId
+        allowsAuditRecords
 ```
 
 The fee settles exactly as it does for the paid quote verifier: one direct Canton
@@ -497,16 +508,22 @@ way as the standard's DARs. The reference paid producer is
 
 ## Audit records
 
-Every successful verification through any of the four verifier interfaces
-creates one `AuditRecord` contract, signed by you and observed by the verifying
-party, inside the consumer's own transaction. Your authority for that create
-comes from the verifier contract you signed; you submit nothing per call. The
-record carries the verified payload and the evidence needed to re-check the
-signature off-ledger; the paid variants add the fee, instrument, and payee that
-settled.
+A successful verification through any of the four verifier interfaces can
+create one `AuditRecord` contract, signed by you and observed by the verifying
+party, inside the consumer's own transaction. Whether it does is a double
+opt-in: you pin your standing policy on the verifier view as
+`allowsAuditRecords`, the caller asks per call through the `createAuditRecord`
+choice argument, and the record is created only when both are true. A caller
+that asks against a policy of false still verifies successfully; nothing
+aborts. Set the policy to false if you want your verifier to stay a pure read
+that writes nothing per call, and to true to receive a receipt whenever a
+caller cooperates. Your authority for the create comes from the verifier
+contract you signed; you submit nothing per call. The record carries the
+verified payload and the evidence needed to re-check the signature off-ledger;
+the paid variants add the fee, instrument, and payee that settled.
 
 Because you sign every record, your participant hosts all of them, and they
-accumulate at one per verification. You are the only signatory, so you can
+accumulate at one per opted-in verification. You are the only signatory, so you can
 archive them at any time; pruning old records is a routine batch job over your
 own contracts. If a data-licensing agreement obliges you to retain usage
 history, rely on PQS rather than the active contract set: archived records stay

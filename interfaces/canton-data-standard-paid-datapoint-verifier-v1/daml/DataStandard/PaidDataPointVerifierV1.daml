@@ -3,7 +3,7 @@
 
 -- | The pay-as-you-go half of the data point signature-verifier standard. Where
 -- `DataStandard.DataPointVerifierV1` authenticates an off-ledger-signed data
--- point for free (writing only its audit record), this interface authenticates the
+-- point for free (at most writing an audit record), this interface authenticates the
 -- same kind of payload and, in the same transaction, settles a per-call fee to a
 -- recipient the verifier pins. It is the data point analogue of
 -- `DataStandard.PaidQuoteVerifierV1`: a producer signs a data point together with
@@ -39,6 +39,7 @@ import DataStandard.DataPointVerifierV1
 import DataStandard.PaidDataPointVerifierAuditV1 (AuditRecord(..))
 import DataStandard.Utils (Values, VerificationAudit(..))
 
+import DA.Action (void, when)
 import DA.Crypto.Text (secp256k1, sha256)
 
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
@@ -166,6 +167,12 @@ data PaidDataPointVerifierView = PaidDataPointVerifierView with
       -- ^ The identifier of the canonical encoding the signature was produced over,
       -- the constant "v1-paid-datapoint-tlv". A consumer or auditor uses it to
       -- select the matching off-ledger encoder when reproducing the bytes.
+    allowsAuditRecords : Bool
+      -- ^ The producer's standing audit policy, pinned on the verifier. When
+      -- `False`, verification still succeeds and the fee still settles but no
+      -- `AuditRecord` is ever created, whatever the caller requests. Public on
+      -- the view, so a consumer that relies on producer-signed receipts reads
+      -- this field before trusting one will exist.
   deriving (Eq, Show)
 
 -- | The identifier of the canonical encoding `PaidDataPointVerifier_VerifyAndPay`
@@ -254,9 +261,12 @@ interface PaidDataPointVerifier where
   viewtype PaidDataPointVerifierView
 
   -- | Authenticate an off-ledger-signed data point and settle its fee, returning
-  -- the data point as a `VerifiedDataPoint`. The choice's ledger effects are the
-  -- fee transfer and a durable `AuditRecord` of the verification (signed by the
-  -- producer, observed by `actor`); it neither archives nor mutates the verifier,
+  -- the data point as a `VerifiedDataPoint`. The fee always settles when the
+  -- payload verifies; a durable `AuditRecord` of the verification (signed by the
+  -- producer, observed by `actor`) is written alongside it only when the
+  -- caller's `createAuditRecord` request and the verifier's `allowsAuditRecords`
+  -- policy are both `True`, and a mismatch skips the record without aborting or
+  -- touching the settlement. It neither archives nor mutates the verifier,
   -- so one verifier serves an unbounded stream of paid calls. It proceeds in a fixed order,
   -- aborting deterministically at the first failure: it checks the signed window is
   -- well-formed (`publishedAt` at or before `expiresAt`), checks the payload has
@@ -301,6 +311,12 @@ interface PaidDataPointVerifier where
         -- ^ The factory, holdings, and registry context the caller settles the fee
         -- with. The recipient and amount are not taken from here; they are the
         -- verifier's `payee` and the payload's `cost.fee`.
+      createAuditRecord : Bool
+        -- ^ The caller's per-call request for an audit record. One is created
+        -- only when this and the verifier's `allowsAuditRecords` policy are both
+        -- `True`; a mismatch never aborts and never changes the settlement, the
+        -- verification simply returns without a record. Declining it also keeps
+        -- the caller's transaction smaller.
     controller actor
     do
       assertMsg "published after expiry" (payload.publishedAt <= payload.expiresAt)
@@ -336,10 +352,12 @@ interface PaidDataPointVerifier where
             canonicalHash = paidDataPointCanonicalHash payload
             signature     = signature
             publicKey     = v.publicKey
-      -- Record the successful paid verification as a durable audit trace, signed
-      -- by the producer and observed by the verifying party. It captures the
-      -- settled payment alongside the verified data point.
-      create AuditRecord with
+      -- Record the paid verification as a durable audit trace, signed by the
+      -- producer and observed by the verifying party, capturing the settled
+      -- payment alongside the verified data point, only when the producer's
+      -- policy and the caller's request both opt in. The fee has already settled
+      -- above, independently of this.
+      when (createAuditRecord && v.allowsAuditRecords) $ void $ create AuditRecord with
         audit = VerificationAudit with
           verifier      = actor
           distributor   = verified.distributor

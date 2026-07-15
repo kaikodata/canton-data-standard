@@ -7,11 +7,11 @@ dependencies:
   - daml-stdlib
   - daml-script
 data-dependencies:
-  - ../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.1.dar
-  - ../interfaces/canton-data-standard-quote-verifier-v1/.daml/dist/canton-data-standard-quote-verifier-v1-0.1.1.dar
-  - ../interfaces/canton-data-standard-quote-verifier-audit-v1/.daml/dist/canton-data-standard-quote-verifier-audit-v1-0.1.1.dar
-  - ../interfaces/canton-data-standard-datapoint-verifier-v1/.daml/dist/canton-data-standard-datapoint-verifier-v1-0.1.1.dar
-  - ../interfaces/canton-data-standard-datapoint-verifier-audit-v1/.daml/dist/canton-data-standard-datapoint-verifier-audit-v1-0.1.1.dar
+  - ../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.2.dar
+  - ../interfaces/canton-data-standard-quote-verifier-v1/.daml/dist/canton-data-standard-quote-verifier-v1-0.1.2.dar
+  - ../interfaces/canton-data-standard-quote-verifier-audit-v1/.daml/dist/canton-data-standard-quote-verifier-audit-v1-0.1.2.dar
+  - ../interfaces/canton-data-standard-datapoint-verifier-v1/.daml/dist/canton-data-standard-datapoint-verifier-v1-0.1.2.dar
+  - ../interfaces/canton-data-standard-datapoint-verifier-audit-v1/.daml/dist/canton-data-standard-datapoint-verifier-audit-v1-0.1.2.dar
   - ../examples/verifier-producer/.daml/dist/verifier-producer-example-0.1.0.dar
   - ../examples/verifier-consumer/.daml/dist/verifier-consumer-example-0.1.0.dar
   - ../examples/datapoint-verifier-producer/.daml/dist/datapoint-verifier-producer-example-0.1.0.dar

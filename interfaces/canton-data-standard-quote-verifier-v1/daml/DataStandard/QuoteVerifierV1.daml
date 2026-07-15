@@ -11,15 +11,17 @@
 --
 -- The verifier is a single long-lived contract holding the producer's public
 -- key. It is feed-agnostic: it authenticates the signer, not the feed, so one
--- verifier serves every feed the producer signs. The choice records each
--- verification as a fresh `AuditRecord` contract but never archives or mutates the
--- verifier itself, so the same contract verifies any number of payloads
--- concurrently without contention.
+-- verifier serves every feed the producer signs. The choice records a
+-- verification as a fresh `AuditRecord` contract only when the producer's
+-- standing `allowsAuditRecords` policy and the caller's per-call request both
+-- opt in, and never archives or mutates the verifier itself, so the same
+-- contract verifies any number of payloads concurrently without contention.
 module DataStandard.QuoteVerifierV1 where
 
 import DataStandard.QuoteVerifierAuditV1 (AuditRecord(..))
 import DataStandard.Utils (Quote, VerificationAudit(..))
 
+import DA.Action (void, when)
 import DA.Crypto.Text (secp256k1, sha256, toHex)
 import DA.Date (Month(Jan), date)
 import qualified DA.Text as T
@@ -51,6 +53,12 @@ data QuoteVerifierView = QuoteVerifierView with
       -- ^ The identifier of the canonical encoding the signature was produced
       -- over, the constant "v1-quote-concat". A consumer or auditor uses it to
       -- select the matching off-ledger encoder when reproducing the signed text.
+    allowsAuditRecords : Bool
+      -- ^ The producer's standing audit policy, pinned on the verifier. When
+      -- `False`, verification still succeeds but no `AuditRecord` is ever
+      -- created, whatever the caller requests. Public on the view, so a consumer
+      -- that relies on producer-signed receipts reads this field before trusting
+      -- one will exist.
   deriving (Eq, Show)
 
 -- | The record a client reconstructs and hands to `QuoteVerifier_Verify`. It is the exact set
@@ -77,7 +85,7 @@ data SignedPayload = SignedPayload with
   deriving (Eq, Show)
 
 -- | The in-memory result `QuoteVerifier_Verify` returns on success. It carries no
--- contract id of its own — the durable `AuditRecord` the choice writes is a
+-- contract id of its own — the durable `AuditRecord` the choice may write is a
 -- separate contract; a consumer uses this result directly in the same
 -- transaction. The leading three fields are positionally and
 -- semantically aligned with `PublishedQuoteView` (`distributor`, `publishedAt`,
@@ -179,8 +187,11 @@ interface QuoteVerifier where
   viewtype QuoteVerifierView
 
   -- | Authenticate an off-ledger-signed quote and return it as a
-  -- `VerifiedPayload`. On success the choice creates a durable `AuditRecord` of
-  -- the verification (signed by the producer, observed by `actor`) but neither
+  -- `VerifiedPayload`. On success the choice may create a durable `AuditRecord`
+  -- of the verification (signed by the producer, observed by `actor`), but only
+  -- when the caller's `createAuditRecord` request and the verifier's
+  -- `allowsAuditRecords` policy are both `True`; a mismatch leaves the
+  -- verification silent, with no record and no abort. Either way it neither
   -- archives nor mutates the verifier, so the verifier is reusable and
   -- contention-free, and the result is consumed in the caller's own transaction.
   -- It checks, in order, that the signed window is well-formed
@@ -204,6 +215,12 @@ interface QuoteVerifier where
       signature : Text
         -- ^ The producer's signature over `payload`'s canonical encoding,
         -- hex-encoded DER ECDSA.
+      createAuditRecord : Bool
+        -- ^ The caller's per-call request for an audit record. One is created
+        -- only when this and the verifier's `allowsAuditRecords` policy are both
+        -- `True`; a mismatch never aborts, the verification simply returns
+        -- without a record. Declining it also keeps the caller's transaction
+        -- smaller.
     controller actor
     do
       assertMsg "published after expiry" (payload.publishedAt <= payload.expiresAt)
@@ -219,9 +236,10 @@ interface QuoteVerifier where
             canonicalHash = quoteCanonicalHash payload
             signature     = signature
             publicKey     = v.publicKey
-      -- Record the successful verification as a durable audit trace, signed by
-      -- the producer and observed by the verifying party.
-      create AuditRecord with
+      -- Record the verification as a durable audit trace, signed by the producer
+      -- and observed by the verifying party, only when the producer's policy and
+      -- the caller's request both opt in.
+      when (createAuditRecord && v.allowsAuditRecords) $ void $ create AuditRecord with
         audit = VerificationAudit with
           verifier      = actor
           distributor   = verified.distributor

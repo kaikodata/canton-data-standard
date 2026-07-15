@@ -6,8 +6,10 @@
 -- `PaidQuoteVerifier_VerifyAndPay` also settles a fee, so the record an auditor
 -- inspects must attest not only that the quote verified but that its fee was
 -- paid. `AuditRecord` is a concrete template the paid verify choice creates when a
--- verification succeeds, turning the pure `VerifiedPayload` plus the settled fee
--- into a durable record.
+-- verification succeeds and the producer's `allowsAuditRecords` policy and the
+-- caller's request both opt in, turning the pure `VerifiedPayload` plus the
+-- settled fee into a durable record. The fee settles whether or not the record
+-- is written.
 --
 -- It carries every field the producer's signature committed to, so an auditor can
 -- reproduce the check: the shared `VerificationAudit` evidence
@@ -54,7 +56,8 @@ data PaidQuoteAuditRecordView = PaidQuoteAuditRecordView with
   deriving (Eq, Show)
 
 -- | The audit-record template for the paid quote verifier. Created by
--- `PaidQuoteVerifier_VerifyAndPay` when a verification succeeds. It is signed by
+-- `PaidQuoteVerifier_VerifyAndPay` when a verification succeeds and both the
+-- producer's audit policy and the caller's request opt in. It is signed by
 -- the producer (`audit.distributor`, the verifier's `oracle`) — whose authority is
 -- present in the verify choice because the producer signs the verifier contract —
 -- and observed by the verifying party (`audit.verifier`, the choice's `actor`). A

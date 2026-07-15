@@ -47,15 +47,21 @@ data VerifierFixture = VerifierFixture with
     disc        : Disclosure
 
 -- | Allocate parties, generate a real secp256k1 keypair, publish a verifier
--- holding the public key, and capture its disclosure.
+-- holding the public key with audit records allowed, and capture its disclosure.
 setup : Script VerifierFixture
-setup = do
+setup = setupWith True
+
+-- | As `setup`, publishing the verifier with the given `allowsAuditRecords`
+-- policy so a test can pin either side of the audit double gate.
+setupWith : Bool -> Script VerifierFixture
+setupWith allowsAuditRecords = do
   oracle  <- allocateParty "Oracle"
   reader  <- allocateParty "Reader"
   keyPair <- secp256k1generatekeypair
   verifierTpl <- submit oracle $ createCmd DataPointSignatureVerifier with
     oracle
     publicKey = keyPair.publicKey
+    allowsAuditRecords
   Some disc <- queryDisclosure oracle verifierTpl
   pure VerifierFixture with
     oracle, reader, keyPair, verifierTpl, disc
@@ -93,7 +99,7 @@ testVerifyHappyPath = do
   let payload = defaultPayload now
   sig <- signDataPoint f.keyPair.privateKey payload
   verified <- submit (actAs f.reader <> disclose f.disc) $
-    exerciseCmd f.verifierIf DataPointVerifier_Verify with actor = f.reader, payload, signature = sig
+    exerciseCmd f.verifierIf DataPointVerifier_Verify with createAuditRecord = True, actor = f.reader, payload, signature = sig
   verified.distributor   === f.oracle
   verified.schemaVersion === "1.0.0"
   verified.values        === payload.values
@@ -132,7 +138,7 @@ testTamperedSignatureRejected = do
   wrongSig <- signDataPoint f.keyPair.privateKey otherPayload
   submitFailsWith f.reader f.disc
     (exerciseCmd f.verifierIf DataPointVerifier_Verify with
-      actor = f.reader, payload, signature = wrongSig)
+      actor = f.reader, payload, signature = wrongSig, createAuditRecord = True)
     "invalid signature"
   assertNoAuditRecords f.oracle
 
@@ -145,7 +151,7 @@ testMalformedSignatureRejected = do
   let payload = defaultPayload now
   submitFailsWith f.reader f.disc
     (exerciseCmd f.verifierIf DataPointVerifier_Verify with
-      actor = f.reader, payload, signature = "00bad00signature")
+      actor = f.reader, payload, signature = "00bad00signature", createAuditRecord = True)
     "not a DER encoded hex string"
 
 -- A valid signature over one payload does not verify a payload with a mutated
@@ -158,7 +164,7 @@ testTamperedPayloadRejected = do
   sigA <- signDataPoint f.keyPair.privateKey payloadA
   let payloadB = payloadA with values = ratePayload "EUR/USD" 9.9999
   submitFailsWith f.reader f.disc
-    (exerciseCmd f.verifierIf DataPointVerifier_Verify with actor = f.reader, payload = payloadB, signature = sigA)
+    (exerciseCmd f.verifierIf DataPointVerifier_Verify with createAuditRecord = True, actor = f.reader, payload = payloadB, signature = sigA)
     "invalid signature"
 
 -- A correctly-signed payload past its expiry is rejected: expiry is the sole
@@ -171,7 +177,7 @@ testExpiredRejected = do
   sig <- signDataPoint f.keyPair.privateKey payload
   passTime (hours 2)                          -- move strictly past expiresAt
   submitFailsWith f.reader f.disc
-    (exerciseCmd f.verifierIf DataPointVerifier_Verify with actor = f.reader, payload, signature = sig)
+    (exerciseCmd f.verifierIf DataPointVerifier_Verify with createAuditRecord = True, actor = f.reader, payload, signature = sig)
     "payload expired"
   assertNoAuditRecords f.oracle
 
@@ -184,7 +190,7 @@ testExpiryBoundaryAccepted = do
   let payload = (defaultPayload now) with expiresAt = now
   sig <- signDataPoint f.keyPair.privateKey payload
   verified <- submit (actAs f.reader <> disclose f.disc) $
-    exerciseCmd f.verifierIf DataPointVerifier_Verify with actor = f.reader, payload, signature = sig
+    exerciseCmd f.verifierIf DataPointVerifier_Verify with createAuditRecord = True, actor = f.reader, payload, signature = sig
   verified.schemaVersion === "1.0.0"
 
 -- Verifying without disclosing the verifier fails on visibility, before any
@@ -196,7 +202,7 @@ testVerifyWithoutDisclosureFails = do
   let payload = defaultPayload now
   sig <- signDataPoint f.keyPair.privateKey payload
   r <- trySubmit (actAs f.reader)
-    (exerciseCmd f.verifierIf DataPointVerifier_Verify with actor = f.reader, payload, signature = sig)
+    (exerciseCmd f.verifierIf DataPointVerifier_Verify with createAuditRecord = True, actor = f.reader, payload, signature = sig)
   case r of
     Right _ -> abort "expected a visibility failure"
     Left _  -> pure ()
@@ -212,9 +218,9 @@ testVerifierReusable = do
   s1 <- signDataPoint f.keyPair.privateKey p1
   s2 <- signDataPoint f.keyPair.privateKey p2
   _ <- submit (actAs f.reader <> disclose f.disc) $
-    exerciseCmd f.verifierIf DataPointVerifier_Verify with actor = f.reader, payload = p1, signature = s1
+    exerciseCmd f.verifierIf DataPointVerifier_Verify with createAuditRecord = True, actor = f.reader, payload = p1, signature = s1
   _ <- submit (actAs f.reader <> disclose f.disc) $
-    exerciseCmd f.verifierIf DataPointVerifier_Verify with actor = f.reader, payload = p2, signature = s2
+    exerciseCmd f.verifierIf DataPointVerifier_Verify with createAuditRecord = True, actor = f.reader, payload = p2, signature = s2
   active <- queryContractId f.oracle f.verifierTpl
   assertMsg "nonconsuming verifier stays active" (isSome active)
 
@@ -229,7 +235,7 @@ testWrongKeyRejected = do
   let payload = defaultPayload now
   sigOther <- signDataPoint other.privateKey payload
   submitFailsWith f.reader f.disc
-    (exerciseCmd f.verifierIf DataPointVerifier_Verify with actor = f.reader, payload, signature = sigOther)
+    (exerciseCmd f.verifierIf DataPointVerifier_Verify with createAuditRecord = True, actor = f.reader, payload, signature = sigOther)
     "invalid signature"
 
 -- A payload signed with `publishedAt` after `expiresAt` is rejected by the
@@ -246,7 +252,7 @@ testPublishedAfterExpiryRejected = do
   sig <- signDataPoint f.keyPair.privateKey payload
   submitFailsWith f.reader f.disc
     (exerciseCmd f.verifierIf DataPointVerifier_Verify with
-      actor = f.reader, payload, signature = sig)
+      actor = f.reader, payload, signature = sig, createAuditRecord = True)
     "published after expiry"
 
 -- A payload whose free text carries the bytes the quote codec reserved as a
@@ -262,7 +268,7 @@ testFreeTextInValuesVerifies = do
         values = ratePayload "BTC|USD|0000000bnot-a-length" 65000.0
   sig <- signDataPoint f.keyPair.privateKey payload
   verified <- submit (actAs f.reader <> disclose f.disc) $
-    exerciseCmd f.verifierIf DataPointVerifier_Verify with actor = f.reader, payload, signature = sig
+    exerciseCmd f.verifierIf DataPointVerifier_Verify with createAuditRecord = True, actor = f.reader, payload, signature = sig
   verified.values === payload.values
 
 -- End-to-end verify-and-use: the consumer workflow authenticates a signed data
@@ -513,6 +519,48 @@ testGoldenEmptyContainersDiffer = do
   encList === "0000000000000000000000000000000000000001670b0000000100000001780a00000000"
   encMap  === "0000000000000000000000000000000000000001670b0000000100000001780b00000000"
   assertMsg "empty list and empty map must encode differently" (encList /= encMap)
+
+-- The producer allows audit records but the caller declines: the data point
+-- still verifies and no audit record is written.
+testAuditProducerAllowsCallerDeclines : Script ()
+testAuditProducerAllowsCallerDeclines = do
+  f <- setup                                  -- allowsAuditRecords = True
+  now <- getTime
+  let payload = defaultPayload now
+  sig <- signDataPoint f.keyPair.privateKey payload
+  verified <- submit (actAs f.reader <> disclose f.disc) $
+    exerciseCmd f.verifierIf DataPointVerifier_Verify with
+      actor = f.reader, payload, signature = sig, createAuditRecord = False
+  verified.schemaVersion === "1.0.0"
+  assertNoAuditRecords f.oracle
+
+-- The caller requests an audit record but the producer's policy forbids it: the
+-- data point still verifies and no audit record is written.
+testAuditProducerForbidsCallerRequests : Script ()
+testAuditProducerForbidsCallerRequests = do
+  f <- setupWith False
+  now <- getTime
+  let payload = defaultPayload now
+  sig <- signDataPoint f.keyPair.privateKey payload
+  verified <- submit (actAs f.reader <> disclose f.disc) $
+    exerciseCmd f.verifierIf DataPointVerifier_Verify with
+      actor = f.reader, payload, signature = sig, createAuditRecord = True
+  verified.schemaVersion === "1.0.0"
+  assertNoAuditRecords f.oracle
+
+-- Neither the producer's policy nor the caller opts in: the data point still
+-- verifies and no audit record is written.
+testAuditNeitherOptsIn : Script ()
+testAuditNeitherOptsIn = do
+  f <- setupWith False
+  now <- getTime
+  let payload = defaultPayload now
+  sig <- signDataPoint f.keyPair.privateKey payload
+  verified <- submit (actAs f.reader <> disclose f.disc) $
+    exerciseCmd f.verifierIf DataPointVerifier_Verify with
+      actor = f.reader, payload, signature = sig, createAuditRecord = False
+  verified.schemaVersion === "1.0.0"
+  assertNoAuditRecords f.oracle
 
 -- | Query the single `AuditRecord` visible to `party`, failing unless there is
 -- exactly one. A successful verification writes one record, seen by both the

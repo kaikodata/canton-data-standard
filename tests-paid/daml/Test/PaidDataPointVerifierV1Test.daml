@@ -71,7 +71,12 @@ defaultFee = 5.0
 -- factory, and have the treasury publish a preapproval, capturing the disclosures
 -- the buyer submits with.
 setup : Script PaidFixture
-setup = do
+setup = setupWith True
+
+-- | As `setup`, publishing the verifier with the given `allowsAuditRecords`
+-- policy so a test can pin either side of the audit double gate.
+setupWith : Bool -> Script PaidFixture
+setupWith allowsAuditRecords = do
   oracle <- allocateParty "Oracle"
   treasury <- allocateParty "Treasury"
   buyer <- allocateParty "Buyer"
@@ -80,7 +85,7 @@ setup = do
   let instrumentId = InstrumentId with admin, id = "USD"
 
   verifierTpl <- submit oracle $ createCmd PaidDataPointSignatureVerifier with
-    oracle, payee = treasury, publicKey = keyPair.publicKey
+    oracle, payee = treasury, publicKey = keyPair.publicKey, allowsAuditRecords
   Some verifierDisc <- queryDisclosure oracle verifierTpl
 
   buyerHoldingCid <- submit admin $ createCmd RegistryHolding with
@@ -156,7 +161,7 @@ testVerifyAndPayHappyPath = do
         <> disclose f.preapprovalDisc
     ) $
     exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
-      actor = f.buyer, payload, signature = sig, payment = paymentArgs f
+      actor = f.buyer, payload, signature = sig, payment = paymentArgs f, createAuditRecord = True
 
   verified.distributor     === f.oracle
   verified.schemaVersion   === "1.0.0"
@@ -215,7 +220,7 @@ testExpiredRejected = do
   passTime (hours 2)                            -- move strictly past expiresAt
   submitFailsWithDiscs f
     ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
-        actor = f.buyer, payload, signature = sig, payment = paymentArgs f )
+        actor = f.buyer, payload, signature = sig, payment = paymentArgs f, createAuditRecord = True)
     "payload expired"
   assertNoAuditRecords f.oracle
 
@@ -231,7 +236,7 @@ testSignatureNotCoveringCostRejected = do
   wrongSig <- signPaid f.keyPair.privateKey otherCost
   submitFailsWith f.buyer f.verifierDisc
     ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
-        actor = f.buyer, payload, signature = wrongSig, payment = paymentArgs f )
+        actor = f.buyer, payload, signature = wrongSig, payment = paymentArgs f, createAuditRecord = True)
     "invalid signature"
 
 -- A signature does not cover a different payee: signing a payload that names one
@@ -249,7 +254,7 @@ testSignatureNotCoveringPayeeRejected = do
   wrongSig <- signPaid f.keyPair.privateKey otherPayee
   submitFailsWith f.buyer f.verifierDisc
     ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
-        actor = f.buyer, payload, signature = wrongSig, payment = paymentArgs f )
+        actor = f.buyer, payload, signature = wrongSig, payment = paymentArgs f, createAuditRecord = True)
     "invalid signature"
 
 -- A non-positive signed fee is rejected before any settlement. The fee is signed
@@ -264,7 +269,7 @@ testZeroFeeRejected = do
   sig <- signPaid f.keyPair.privateKey payload
   submitFailsWithDiscs f
     ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
-        actor = f.buyer, payload, signature = sig, payment = paymentArgs f )
+        actor = f.buyer, payload, signature = sig, payment = paymentArgs f, createAuditRecord = True)
     "cost fee must be positive"
   assertNoAuditRecords f.oracle
 
@@ -280,7 +285,7 @@ testNoPreapprovalRejected = do
         context = ExtraArgs with context = emptyChoiceContext, meta = emptyMetadata
   submitFailsWithDiscsNoPreapproval f
     ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
-        actor = f.buyer, payload, signature = sig, payment = noPreapproval )
+        actor = f.buyer, payload, signature = sig, payment = noPreapproval, createAuditRecord = True)
     "receiver has no standing preapproval for this instrument"
 
 -- The payment instrument must match the signed cost: paying with a holding of a
@@ -299,7 +304,7 @@ testPaymentInstrumentMismatchRejected = do
         inputHoldingCids = [toInterfaceContractId @Holding eurHoldingCid]
   submitFailsWithDiscs f
     ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
-        actor = f.buyer, payload, signature = sig, payment = mismatchedPayment )
+        actor = f.buyer, payload, signature = sig, payment = mismatchedPayment, createAuditRecord = True)
     "input holding must match the transfer instrument"
 
 -- A paid payload signed with `publishedAt` after `expiresAt` is rejected by the
@@ -315,7 +320,7 @@ testPaidPublishedAfterExpiryRejected = do
   sig <- signPaid f.keyPair.privateKey payload
   submitFailsWithDiscs f
     ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
-        actor = f.buyer, payload, signature = sig, payment = paymentArgs f )
+        actor = f.buyer, payload, signature = sig, payment = paymentArgs f, createAuditRecord = True)
     "published after expiry"
 
   treasuryHoldings <- query @RegistryHolding f.treasury
@@ -336,6 +341,7 @@ testRogueVerifierCannotRedirectFee = do
 
   rogueTpl <- submit attacker $ createCmd PaidDataPointSignatureVerifier with
     oracle = attacker, payee = attacker, publicKey = f.keyPair.publicKey
+    allowsAuditRecords = True
   let rogueIf = toInterfaceContractId @PaidDataPointVerifier rogueTpl
 
   attackerHoldingCid <- submit f.admin $ createCmd RegistryHolding with
@@ -363,7 +369,7 @@ testRogueVerifierCannotRedirectFee = do
             <> disclose attackerPreapprovalDisc
         )
         ( exerciseCmd rogueIf PaidDataPointVerifier_VerifyAndPay with
-            actor = attacker, payload, signature = sig, payment = attackerPayment )
+            actor = attacker, payload, signature = sig, payment = attackerPayment, createAuditRecord = True)
     )
     "payee mismatch"
 
@@ -409,7 +415,7 @@ testNoOpTransferFactorySkipRejected = do
 
   submitFailsWith f.buyer f.verifierDisc
     ( exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
-        actor = f.buyer, payload, signature = sig, payment = skipPayment )
+        actor = f.buyer, payload, signature = sig, payment = skipPayment, createAuditRecord = True)
     "fee settlement produced no receiver holdings"
 
 -- End-to-end paid verify-and-use: the consumer workflow authenticates a signed
@@ -554,6 +560,74 @@ submitFailsWithDiscsNoPreapproval f cmds = expectAbort
       )
       cmds
   )
+
+-- The producer allows audit records but the caller declines: the data point
+-- verifies, the fee settles, and no audit record is written.
+testAuditProducerAllowsCallerDeclines : Script ()
+testAuditProducerAllowsCallerDeclines = do
+  f <- setup                                  -- allowsAuditRecords = True
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+  verified <- submitPaid f $
+    exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
+      actor = f.buyer, payload, signature = sig, payment = paymentArgs f, createAuditRecord = False
+  verified.schemaVersion === "1.0.0"
+  assertFeeSettled f
+  assertNoAuditRecords f.oracle
+
+-- The caller requests an audit record but the producer's policy forbids it: the
+-- data point verifies and the fee still settles (payment is independent of the
+-- gate), and no audit record is written.
+testAuditProducerForbidsCallerRequests : Script ()
+testAuditProducerForbidsCallerRequests = do
+  f <- setupWith False
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+  verified <- submitPaid f $
+    exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
+      actor = f.buyer, payload, signature = sig, payment = paymentArgs f, createAuditRecord = True
+  verified.schemaVersion === "1.0.0"
+  assertFeeSettled f
+  assertNoAuditRecords f.oracle
+
+-- Neither the producer's policy nor the caller opts in: the data point verifies,
+-- the fee settles, and no audit record is written.
+testAuditNeitherOptsIn : Script ()
+testAuditNeitherOptsIn = do
+  f <- setupWith False
+  now <- getTime
+  let payload = defaultPayload f now
+  sig <- signPaid f.keyPair.privateKey payload
+  verified <- submitPaid f $
+    exerciseCmd f.verifierIf PaidDataPointVerifier_VerifyAndPay with
+      actor = f.buyer, payload, signature = sig, payment = paymentArgs f, createAuditRecord = False
+  verified.schemaVersion === "1.0.0"
+  assertFeeSettled f
+  assertNoAuditRecords f.oracle
+
+-- | Submit `cmds` as the buyer with the verifier, factory, and preapproval
+-- disclosures the full settlement path needs.
+submitPaid : PaidFixture -> Commands a -> Script a
+submitPaid f = submit
+  ( actAs f.buyer
+      <> disclose f.verifierDisc
+      <> disclose f.factoryDisc
+      <> disclose f.preapprovalDisc
+  )
+
+-- | Assert the treasury holds exactly the one fee holding a settlement credits,
+-- proving the fee settled regardless of whether an audit record was written.
+assertFeeSettled : PaidFixture -> Script ()
+assertFeeSettled f = do
+  treasuryHoldings <- query @RegistryHolding f.treasury
+  case treasuryHoldings of
+    [(_, h)] -> do
+      h.owner        === f.treasury
+      h.amount       === defaultFee
+      h.instrumentId === f.instrumentId
+    _ -> abort ("expected exactly one treasury holding, got: " <> show (length treasuryHoldings))
 
 -- | Query the single `AuditRecord` visible to `party`, failing unless there is
 -- exactly one. A successful paid verification writes one record, seen by both

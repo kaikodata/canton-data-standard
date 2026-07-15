@@ -80,7 +80,7 @@ template RateSubscription
       do
         now <- getTime
         v <- exercise verifierCid DataPointVerifier_Verify with
-          actor = subscriber, payload, signature
+          actor = subscriber, payload, signature, createAuditRecord = True
         assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
         assertMsg "data point published in the future" (v.publishedAt <= now)
         assertMsg "data point too stale" (subTime now v.publishedAt <= maxAge)
@@ -116,12 +116,15 @@ template RateSubscription
 -- the producer produced it, so a later review has the provenance.
 --
 -- The verification's own audit trace is no longer this template's concern:
--- `DataPointVerifier_Verify` now creates a standalone
+-- `DataPointVerifier_Verify` writes its own standalone
 -- `DataStandard.DataPointVerifierAuditV1.AuditRecord` (signed by the producer,
--- observed by the verifier) in the same transaction. This record still retains the
--- signed validity window, the full `values` payload, and the
+-- observed by the verifier) in the same transaction when the producer's audit
+-- policy and this call's request agree (the subscription passes
+-- `createAuditRecord = True`). This record still retains the signed validity
+-- window, the full `values` payload, and the
 -- `canonicalHash`/`signature`/`publicKey` evidence beside the extracted `rate`, so
--- the rate record alone remains self-describing.
+-- the rate record alone remains self-describing whether or not that record was
+-- written.
 template RecordedRate
   with
     subscriber : Party
