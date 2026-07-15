@@ -3,7 +3,7 @@
 
 -- | The pay-as-you-go half of the signature-verifier standard. Where
 -- `DataStandard.QuoteVerifierV1` authenticates an off-ledger-signed quote for free
--- (writing only its audit record), this interface authenticates the same kind of
+-- (at most writing an audit record), this interface authenticates the same kind of
 -- payload and, in the same transaction, settles a per-call fee to a recipient the
 -- verifier pins.
 -- A producer signs a quote together with the price of verifying it; a client
@@ -32,6 +32,7 @@ import DataStandard.PaidQuoteVerifierAuditV1 (AuditRecord(..))
 import DataStandard.QuoteVerifierV1 (SignedPayload(..), VerifiedPayload(..), canonicalQuoteText, delimiterFree)
 import DataStandard.Utils (Quote, VerificationAudit(..))
 
+import DA.Action (void, when)
 import DA.Crypto.Text (secp256k1, sha256, toHex)
 
 import Splice.Api.Token.HoldingV1 (Holding, InstrumentId)
@@ -148,6 +149,12 @@ data PaidQuoteVerifierView = PaidQuoteVerifierView with
       -- ^ The identifier of the canonical encoding the signature was produced
       -- over, the constant "v1-paid-quote-concat". A consumer or auditor uses it
       -- to select the matching off-ledger encoder when reproducing the text.
+    allowsAuditRecords : Bool
+      -- ^ The producer's standing audit policy, pinned on the verifier. When
+      -- `False`, verification still succeeds and the fee still settles but no
+      -- `AuditRecord` is ever created, whatever the caller requests. Public on
+      -- the view, so a consumer that relies on producer-signed receipts reads
+      -- this field before trusting one will exist.
   deriving (Eq, Show)
 
 -- | The identifier of the canonical encoding `PaidQuoteVerifier_VerifyAndPay` reproduces and
@@ -236,9 +243,12 @@ interface PaidQuoteVerifier where
   viewtype PaidQuoteVerifierView
 
   -- | Authenticate an off-ledger-signed quote and settle its fee, returning the
-  -- quote as a `VerifiedPayload`. The choice's ledger effects are the fee transfer
-  -- and a durable `AuditRecord` of the verification (signed by the producer,
-  -- observed by `actor`); it neither archives nor mutates the verifier, so one
+  -- quote as a `VerifiedPayload`. The fee always settles when the payload
+  -- verifies; a durable `AuditRecord` of the verification (signed by the
+  -- producer, observed by `actor`) is written alongside it only when the
+  -- caller's `createAuditRecord` request and the verifier's `allowsAuditRecords`
+  -- policy are both `True`, and a mismatch skips the record without aborting or
+  -- touching the settlement. It neither archives nor mutates the verifier, so one
   -- verifier serves an unbounded stream of paid calls. It proceeds in a fixed order,
   -- aborting deterministically at the first failure: it checks the signed window
   -- is well-formed (`publishedAt` at or before `expiresAt`), checks the payload
@@ -283,6 +293,12 @@ interface PaidQuoteVerifier where
         -- ^ The factory, holdings, and registry context the caller settles the
         -- fee with. The recipient and amount are not taken from here; they are
         -- the verifier's `payee` and the payload's `cost.fee`.
+      createAuditRecord : Bool
+        -- ^ The caller's per-call request for an audit record. One is created
+        -- only when this and the verifier's `allowsAuditRecords` policy are both
+        -- `True`; a mismatch never aborts and never changes the settlement, the
+        -- verification simply returns without a record. Declining it also keeps
+        -- the caller's transaction smaller.
     controller actor
     do
       assertMsg "published after expiry" (payload.publishedAt <= payload.expiresAt)
@@ -319,10 +335,12 @@ interface PaidQuoteVerifier where
             canonicalHash = paidCanonicalHash payload
             signature     = signature
             publicKey     = v.publicKey
-      -- Record the successful paid verification as a durable audit trace, signed
-      -- by the producer and observed by the verifying party. It captures the
-      -- settled payment alongside the verified quote.
-      create AuditRecord with
+      -- Record the paid verification as a durable audit trace, signed by the
+      -- producer and observed by the verifying party, capturing the settled
+      -- payment alongside the verified quote, only when the producer's policy and
+      -- the caller's request both opt in. The fee has already settled above,
+      -- independently of this.
+      when (createAuditRecord && v.allowsAuditRecords) $ void $ create AuditRecord with
         audit = VerificationAudit with
           verifier      = actor
           distributor   = verified.distributor

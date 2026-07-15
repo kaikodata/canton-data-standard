@@ -31,6 +31,6 @@ minimal stub, as its own module documents, and must not be deployed as-is.
 
 ## Supported versions
 
-The standard is pre-release (`0.1.0`). Fixes land on the current version line
+The standard is pre-release (`0.1.2`). Fixes land on the current version line
 until the first tagged release, after which this section will track which
 versions receive security updates.

@@ -1,12 +1,12 @@
 sdk-version: 3.4.11
 name: canton-data-standard-paid-quote-verifier-audit-v1
 source: daml
-version: 0.1.1
+version: 0.1.2
 dependencies:
   - daml-prim
   - daml-stdlib
 data-dependencies:
-  - ../canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.1.dar
+  - ../canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.2.dar
   - ../../dependencies/splice-api-token-holding-v1-1.0.0.dar
   - ../../dependencies/splice-api-token-metadata-v1-1.0.0.dar
 build-options:

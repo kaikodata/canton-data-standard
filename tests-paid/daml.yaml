@@ -7,13 +7,13 @@ dependencies:
   - daml-stdlib
   - daml-script
 data-dependencies:
-  - ../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.1.dar
-  - ../interfaces/canton-data-standard-quote-verifier-v1/.daml/dist/canton-data-standard-quote-verifier-v1-0.1.1.dar
-  - ../interfaces/canton-data-standard-paid-quote-verifier-v1/.daml/dist/canton-data-standard-paid-quote-verifier-v1-0.1.1.dar
-  - ../interfaces/canton-data-standard-paid-quote-verifier-audit-v1/.daml/dist/canton-data-standard-paid-quote-verifier-audit-v1-0.1.1.dar
-  - ../interfaces/canton-data-standard-datapoint-verifier-v1/.daml/dist/canton-data-standard-datapoint-verifier-v1-0.1.1.dar
-  - ../interfaces/canton-data-standard-paid-datapoint-verifier-v1/.daml/dist/canton-data-standard-paid-datapoint-verifier-v1-0.1.1.dar
-  - ../interfaces/canton-data-standard-paid-datapoint-verifier-audit-v1/.daml/dist/canton-data-standard-paid-datapoint-verifier-audit-v1-0.1.1.dar
+  - ../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.2.dar
+  - ../interfaces/canton-data-standard-quote-verifier-v1/.daml/dist/canton-data-standard-quote-verifier-v1-0.1.2.dar
+  - ../interfaces/canton-data-standard-paid-quote-verifier-v1/.daml/dist/canton-data-standard-paid-quote-verifier-v1-0.1.2.dar
+  - ../interfaces/canton-data-standard-paid-quote-verifier-audit-v1/.daml/dist/canton-data-standard-paid-quote-verifier-audit-v1-0.1.2.dar
+  - ../interfaces/canton-data-standard-datapoint-verifier-v1/.daml/dist/canton-data-standard-datapoint-verifier-v1-0.1.2.dar
+  - ../interfaces/canton-data-standard-paid-datapoint-verifier-v1/.daml/dist/canton-data-standard-paid-datapoint-verifier-v1-0.1.2.dar
+  - ../interfaces/canton-data-standard-paid-datapoint-verifier-audit-v1/.daml/dist/canton-data-standard-paid-datapoint-verifier-audit-v1-0.1.2.dar
   - ../examples/test-token-registry/.daml/dist/test-token-registry-0.1.0.dar
   - ../examples/paid-verifier-producer/.daml/dist/paid-verifier-producer-example-0.1.0.dar
   - ../examples/paid-verifier-consumer/.daml/dist/paid-verifier-consumer-example-0.1.0.dar

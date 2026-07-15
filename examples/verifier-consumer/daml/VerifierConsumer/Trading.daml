@@ -66,7 +66,8 @@ template VerifiedQuoteTradeOffer
       controller buyer
       do
         now <- getTime
-        v <- exercise verifierCid QuoteVerifier_Verify with actor = buyer, payload, signature
+        v <- exercise verifierCid QuoteVerifier_Verify with
+          actor = buyer, payload, signature, createAuditRecord = True
         assertMsg "feed mismatch" (v.quote.feedId == feedId)
         assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
         assertMsg "quote published in the future" (v.publishedAt <= now)
@@ -95,11 +96,13 @@ template VerifiedQuoteTradeOffer
 -- it (`publishedAt`), so a later staleness review has both timestamps.
 --
 -- The verification's own audit trace is no longer this template's concern:
--- `QuoteVerifier_Verify` now creates a standalone
+-- `QuoteVerifier_Verify` writes its own standalone
 -- `DataStandard.QuoteVerifierAuditV1.AuditRecord` (signed by the producer, observed
--- by the verifier) in the same transaction. This settlement still retains the
--- signed validity window and the `canonicalHash`/`signature`/`publicKey` evidence
--- beside the trade, so the trade record alone remains self-describing.
+-- by the verifier) in the same transaction when the producer's audit policy and
+-- this call's request agree (the offer passes `createAuditRecord = True`). This
+-- settlement still retains the signed validity window and the
+-- `canonicalHash`/`signature`/`publicKey` evidence beside the trade, so the trade
+-- record alone remains self-describing whether or not that record was written.
 template VerifiedQuoteTradeSettlement
   with
     seller : Party

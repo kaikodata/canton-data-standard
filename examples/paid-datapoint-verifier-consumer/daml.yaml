@@ -6,9 +6,9 @@ dependencies:
   - daml-prim
   - daml-stdlib
 data-dependencies:
-  - ../../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.1.dar
-  - ../../interfaces/canton-data-standard-datapoint-verifier-v1/.daml/dist/canton-data-standard-datapoint-verifier-v1-0.1.1.dar
-  - ../../interfaces/canton-data-standard-paid-datapoint-verifier-v1/.daml/dist/canton-data-standard-paid-datapoint-verifier-v1-0.1.1.dar
+  - ../../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.2.dar
+  - ../../interfaces/canton-data-standard-datapoint-verifier-v1/.daml/dist/canton-data-standard-datapoint-verifier-v1-0.1.2.dar
+  - ../../interfaces/canton-data-standard-paid-datapoint-verifier-v1/.daml/dist/canton-data-standard-paid-datapoint-verifier-v1-0.1.2.dar
   - ../../dependencies/splice-api-token-holding-v1-1.0.0.dar
   - ../../dependencies/splice-api-token-metadata-v1-1.0.0.dar
   - ../../dependencies/splice-api-token-transfer-instruction-v1-1.0.0.dar
