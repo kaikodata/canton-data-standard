@@ -18,6 +18,8 @@ To get the DARs, clone this repository and run `dpm build --all`; they land
 in `interfaces/*/.daml/dist/`. CI also attaches them to each run as build
 artifacts.
 
+> REVIEW(SM): probably better to check them in, so people can just get them directly from the repo
+
 Reference publications as `ContractId PublishedData` (the interface, never a
 template), so your code never names a producer's package. That removes one of
 the two things that tie a consumer to a provider. The other is the payload
@@ -437,6 +439,14 @@ explicit disclosure when you are not a stakeholder of them, and the paid path
 needs the Canton Token Standard interface DARs from
 [`dependencies/`](../dependencies) on your `daml.yaml` alongside the verifier DAR.
 
+-- REVIEW(SM): I'm not sure that standardizing this paid path is necessary for the following reasons:
+--  * individual payments are relatively expensive in terms of traffic, as the network calibrates the traffic cost to 1$ per CC transfer
+--  * there is an alternative that doesn't require using a different interface and does netting:
+--      have the producer's interface implementation create a contract that represents a bill for the data points, and settle these bills
+--      in a batch transaction. Require less trusted customers to hold lock some funds to the producer (e.g., as a committed V2.Allocation,
+--      see https://lists.sync.global/g/cip-discuss/message/743), so that the bill can always be settled.
+
+
 ## Reading at scale
 
 For querying many feeds across providers, prefer the
@@ -447,3 +457,6 @@ producer. On Canton 3.4, use PQS 3.4.3 or later (earlier versions had an
 interface-view projection bug). If you consume streams directly instead:
 interface views are served on the Transaction Stream and the ACS, not the
 Transaction Tree Stream.
+
+-- REVIEW(SM): how is this supposed to work given that this data is only
+-- available on the distributor's participant?

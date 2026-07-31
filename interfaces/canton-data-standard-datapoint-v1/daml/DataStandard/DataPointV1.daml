@@ -9,6 +9,8 @@ module DataStandard.DataPointV1 where
 
 import DataStandard.Utils (Metadata, Values)
 
+-- REVIEW(SM): `PublishedData` vs `DataPoint` ?
+
 -- | The on-ledger view every `PublishedData` implementation exposes. A
 -- consumer reads only these fields, and is therefore decoupled from the
 -- template that produced them.
