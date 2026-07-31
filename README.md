@@ -4,6 +4,9 @@ Versioned Daml interfaces for publishing and consuming market data on
 [Canton](https://docs.canton.network/), without coupling consumers to any
 provider's Daml package.
 
+
+-- REVIEW(SM): here we talk about provider, below there are producers and in the code there are distributors? Decide on a single term and use it consistently.
+
 A provider publishes market data by implementing a shared interface on its own
 contracts. A consumer reads that data through the same interface. Neither side
 depends on the other's code, only on the interface packages in this repository.

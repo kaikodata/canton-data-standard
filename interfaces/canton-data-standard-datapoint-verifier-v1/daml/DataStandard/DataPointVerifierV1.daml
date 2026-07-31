@@ -65,6 +65,8 @@ data DataPointVerifierView = DataPointVerifierView with
       -- one will exist.
   deriving (Eq, Show)
 
+-- REVIEW(SM): why can't you reuse the type definition from `canton-data-standard-datapoint-v1`?
+
 -- | The record a client reconstructs and hands to `DataPointVerifier_Verify`. It
 -- is the exact set of fields the producer signed off-ledger: the data point's
 -- payload plus the validity window the signature commits to. The signature
@@ -130,6 +132,17 @@ data VerifiedDataPoint = VerifiedDataPoint with
       -- ^ The public key the signature verified against, copied from the
       -- verifier. Retained as evidence so re-verification needs nothing else.
   deriving (Eq, Show)
+
+
+-- REVIEW(SM): I advise against putting code into the inteface definitions, as you then can't fix bugs.
+-- Put shared code into a separate utility module that does not define and templates or interfaces as done for example for TSv2 here:
+-- https://github.com/canton-network/splice/blob/fca2076ec43a7f124687ef97b38ca5ea547dcb80/token-standard/splice-token-standard-utils/daml.yaml#L28-L31
+
+
+-- REIVEW(SM): consider signing a structural hash instead of the encoding to bytes.
+-- Thereby you decouple the encoding from the signature, and likely gain some performance.
+-- You can see an example of this in action here: https://github.com/canton-network/splice/blob/main/daml/splice-amulet/daml/Splice/Amulet/CryptoHash.daml
+-- Used here: https://github.com/canton-network/splice/blob/fca2076ec43a7f124687ef97b38ca5ea547dcb80/daml/splice-amulet/daml/Splice/Amulet/RewardAccountingV2.daml#L83
 
 -- | The identifier of the canonical encoding `DataPointVerifier_Verify`
 -- reproduces and checks the signature over. A producer's off-ledger signer must

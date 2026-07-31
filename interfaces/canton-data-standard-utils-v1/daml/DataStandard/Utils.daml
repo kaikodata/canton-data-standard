@@ -30,16 +30,24 @@ data AnyValue
   | AVMap (TextMap AnyValue)
   deriving (Eq, Show)
 
+-- REVIEW(SM): compared to Splice.Api.Token.MetadataV1.AnyValue there are missing
+-- entires here. Why? Could you also reuse the one from token metadata?
+
 -- | A data point's payload: a map from field name to tagged value. The field
 -- names a given feed is expected to carry, and their types, are defined by the
 -- `schemaVersion` on the view that exposes the payload.
 type Values = TextMap AnyValue
+
+
+-- REVIEW(SM):  the types above are indirectly part of the interfaces
+-- the code below is not and better moved out so one can iterate on it using SCU
 
 -- | Conversion of a native Daml value into its `AnyValue` tag. An instance
 -- exists for each type the closed set supports, which lets `insertField`
 -- accept a native value without the caller naming a constructor.
 class ToAnyValue a where
   toAny : a -> AnyValue
+
 
 -- | Recovery of a native Daml value from its `AnyValue` tag. Returns `None`
 -- when the tag holds a different type, so a consumer asking for the wrong type
@@ -100,6 +108,9 @@ data Quote = Quote with
       -- ^ The price feed this quote is for, for example "BTC/USD". A consumer
       -- trusts a (distributor, feedId) pair; switching provider is re-pointing
       -- it, with no recompile.
+
+      -- REIVEW(SM): what's the difference of provider vs. distributor?
+
     price : Decimal
       -- ^ The quoted price for the feed, as an exact base-10 fixed-point number.
     priceTime : Time
@@ -175,6 +186,8 @@ data VerificationAudit = VerificationAudit with
 data Metadata = Metadata with
     values : TextMap Text
   deriving (Eq, Show)
+
+-- REVIEW(SM): consider reusing the one from token-standard
 
 -- | Metadata carrying no annotations; the conventional contents of a view's
 -- `metadata` field when the provider has nothing to attach.
