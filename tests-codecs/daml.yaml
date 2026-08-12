@@ -1,0 +1,15 @@
+sdk-version: 3.4.11
+name: canton-data-standard-tests-codecs
+source: daml
+version: 0.2.0
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+data-dependencies:
+  - ../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.2.0.dar
+  - ../interfaces/canton-data-standard-codecs/.daml/dist/canton-data-standard-codecs-0.2.0.dar
+build-options:
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches
+  - --target=2.1

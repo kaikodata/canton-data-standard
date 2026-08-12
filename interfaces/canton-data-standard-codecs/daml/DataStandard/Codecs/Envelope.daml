@@ -1,0 +1,64 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The signed envelopes: what exactly a distributor's signature commits to, for
+-- each of the standard's two payload shapes, and the codec identifiers that name
+-- those envelopes on a `DistributorKeyView`.
+--
+-- An envelope is hashed as a record of its fields, so the field order below is
+-- normative: an off-ledger signer must hash the same fields in the same order.
+-- Both envelopes commit to the validity window (`publishedAt`, `expiresAt`)
+-- alongside the payload. That is what makes `expiresAt` a signed replay bound
+-- and not a hint a replayer could edit.
+--
+-- The quote envelope hashes a `Quote` as a typed record and has no schema
+-- string: a quote's shape is fixed by this standard, so there is nothing to
+-- version inside the payload. The data point envelope does commit to
+-- `schemaVersion`, because a generic payload's meaning depends on it and an
+-- unsigned schema would let a replayer re-present authentic values under a
+-- different schema.
+module DataStandard.Codecs.Envelope
+  ( quoteHashCodecId
+  , dataPointHashCodecId
+  , hashQuote
+  , hashSignedQuote
+  , hashSignedDataPoint
+  ) where
+
+import DataStandard.Codecs.StructuralHash (Hash, Hashable(hash), hashRecord)
+import DataStandard.Utils (AnyValue(..), Quote, SignedDataPoint, SignedQuote)
+
+-- | The identifier of the quote envelope, as advertised on a
+-- `DistributorKeyView.payloadCodec`. A key that names this codec signs quotes
+-- hashed by `hashSignedQuote`.
+quoteHashCodecId : Text
+quoteHashCodecId = "v2-quote-hash"
+
+-- | The identifier of the data point envelope, as advertised on a
+-- `DistributorKeyView.payloadCodec`. A key that names this codec signs data points
+-- hashed by `hashSignedDataPoint`.
+dataPointHashCodecId : Text
+dataPointHashCodecId = "v2-datapoint-hash"
+
+-- | The hash of a quote's economic content: a 3-field record of the feed, the
+-- price, and the market instant. `hashSignedQuote` nests this rather than
+-- flattening it, so the quote hashes identically wherever it is embedded.
+hashQuote : Quote -> Hash
+hashQuote q = hashRecord [hash q.feedId, hash q.price, hash q.priceTime]
+
+-- | The hash a quote signature commits to: a 3-field record of the validity
+-- window and the nested quote.
+hashSignedQuote : SignedQuote -> Hash
+hashSignedQuote sq = hashRecord [hash sq.publishedAt, hash sq.expiresAt, hashQuote sq.quote]
+
+-- | The hash a data point signature commits to: a 4-field record of the validity
+-- window, the schema version, and the payload. The payload goes through the
+-- tagged `AnyValue` path as a map node, so its field names, its value types, and
+-- its nesting are all part of the hash.
+hashSignedDataPoint : SignedDataPoint -> Hash
+hashSignedDataPoint p = hashRecord
+  [ hash p.publishedAt
+  , hash p.expiresAt
+  , hash p.schemaVersion
+  , hash (AVMap p.values)
+  ]

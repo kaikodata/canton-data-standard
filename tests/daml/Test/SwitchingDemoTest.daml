@@ -1,30 +1,30 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | The provider-switching demonstration: one consumer reads the same feed
--- from two structurally different providers with no Daml change. The direct
--- provider stores a price; the market-maker provider stores a bid and an ask
+-- | The distributor-switching demonstration: one consumer reads the same feed
+-- from two structurally different distributors with no Daml change. The direct
+-- distributor stores a price; the market-maker distributor stores a bid and an ask
 -- and derives the mid. Both expose the identical interface views, so the same
--- compiled consumer choices settle against either, and switching provider is
--- passing a different `expectedDistributor`.
+-- compiled consumer choices settle against either, and switching distributor
+-- amounts to passing a different `expectedDistributor`.
 module Test.SwitchingDemoTest where
 
 import DA.Assert ((===))
 import Daml.Script
 
 import SwitchingConsumer.Trading
-import SwitchingProviderDirect.Oracle
-import SwitchingProviderMarketMaker.Oracle
-import DataStandard.DataPointV1 (PublishedData)
+import SwitchingDistributorDirect.Oracle
+import SwitchingDistributorMarketMaker.Oracle
+import DataStandard.DataPointV1 (PublishedDataPoint)
 import DataStandard.QuoteV1 (PublishedQuote)
 import DataStandard.Utils (emptyMetadata)
 import Test.Fixtures
 
--- | Both providers publish the same feed at the same price (the market maker's
+-- | Both distributors publish the same feed at the same price (the market maker's
 -- bid/ask straddle it), and the one `QuoteSwitchOffer` choice settles against
--- each in turn. Switching provider is re-pointing `expectedDistributor`.
-testQuoteSwitchAcrossProviders : Script ()
-testQuoteSwitchAcrossProviders = do
+-- each in turn. All that changes between the two is `expectedDistributor`.
+testQuoteSwitchAcrossDistributors : Script ()
+testQuoteSwitchAcrossDistributors = do
   oracleDirect <- allocateParty "OracleDirect"
   oracleMM     <- allocateParty "OracleMarketMaker"
   seller       <- allocateParty "Seller"
@@ -38,7 +38,7 @@ testQuoteSwitchAcrossProviders = do
     oracle = oracleMM, feedId = "BTC/USD", assetPair = "BTC/USD"
     bid = 64999.0, ask = 65001.0, priceTime = now, publishedAt = now
 
-  -- The same consumer choice handles the direct provider ...
+  -- The same consumer choice handles the direct distributor ...
   directOfferCid <- submit seller $ createCmd QuoteSwitchOffer with
     seller, buyer, expectedDistributor = oracleDirect, feedId = "BTC/USD"
     quantity = 0.5
@@ -64,9 +64,9 @@ testQuoteSwitchAcrossProviders = do
 
 -- | The same switch over the generic data point path. The market maker's view
 -- carries extra `bid`/`ask` fields, which a consumer reading only `assetPair`
--- and `price` ignores, so both providers settle identically.
-testDataPointSwitchAcrossProviders : Script ()
-testDataPointSwitchAcrossProviders = do
+-- and `price` ignores, so both distributors settle identically.
+testDataPointSwitchAcrossDistributors : Script ()
+testDataPointSwitchAcrossDistributors = do
   oracleDirect <- allocateParty "OracleDirect"
   oracleMM     <- allocateParty "OracleMarketMaker"
   seller       <- allocateParty "Seller"
@@ -83,7 +83,7 @@ testDataPointSwitchAcrossProviders = do
   directOfferCid <- submit seller $ createCmd DataPointSwitchOffer with
     seller, buyer, expectedDistributor = oracleDirect, assetPair = "BTC/USD"
     quantity = 0.5
-    dataCid = toInterfaceContractId @PublishedData directCid
+    dataCid = toInterfaceContractId @PublishedDataPoint directCid
   Some directDisc <- queryDisclosure oracleDirect directCid
   directSettleCid <- submit (actAs buyer <> disclose directDisc) $
     exerciseCmd directOfferCid AcceptDataPointSwitch
@@ -94,7 +94,7 @@ testDataPointSwitchAcrossProviders = do
   mmOfferCid <- submit seller $ createCmd DataPointSwitchOffer with
     seller, buyer, expectedDistributor = oracleMM, assetPair = "BTC/USD"
     quantity = 0.5
-    dataCid = toInterfaceContractId @PublishedData mmCid
+    dataCid = toInterfaceContractId @PublishedDataPoint mmCid
   Some mmDisc <- queryDisclosure oracleMM mmCid
   mmSettleCid <- submit (actAs buyer <> disclose mmDisc) $
     exerciseCmd mmOfferCid AcceptDataPointSwitch
@@ -103,8 +103,8 @@ testDataPointSwitchAcrossProviders = do
   mmSettle.distributor === oracleMM
 
 -- | An offer that trusts `oracleDirect` but is handed the market maker's quote
--- aborts: the standard authenticates the distributor, and the consumer gates on
--- the one it trusts.
+-- aborts. The standard authenticates the distributor; the consumer gates on the
+-- one it trusts.
 testRejectsUntrustedDistributor : Script ()
 testRejectsUntrustedDistributor = do
   oracleDirect <- allocateParty "OracleDirect"
@@ -126,7 +126,7 @@ testRejectsUntrustedDistributor = do
 
 -- | A trusted distributor publishing a schema without an `assetPair` field
 -- aborts the data point path on the missing field. `TestFeed` is a valid
--- `PublishedData` implementation carrying `feedId`/`rate`, not `assetPair`.
+-- `PublishedDataPoint` implementation carrying `feedId`/`rate`, not `assetPair`.
 testDataPointSwitchRejectsForeignSchema : Script ()
 testDataPointSwitchRejectsForeignSchema = do
   oracle <- allocateParty "OracleDirect"
@@ -140,15 +140,15 @@ testDataPointSwitchRejectsForeignSchema = do
   offerCid <- submit seller $ createCmd DataPointSwitchOffer with
     seller, buyer, expectedDistributor = oracle, assetPair = "BTC/USD"
     quantity = 0.5
-    dataCid = toInterfaceContractId @PublishedData feedCid
+    dataCid = toInterfaceContractId @PublishedDataPoint feedCid
   Some disc <- queryDisclosure oracle feedCid
   submitFailsWith buyer disc (exerciseCmd offerCid AcceptDataPointSwitch)
     "published data missing field: assetPair"
 
--- | When two trusted providers agree within tolerance, the cross-check settles
+-- | When two trusted distributors agree within tolerance, the cross-check settles
 -- at the average of their prices.
-testCrossCheckSettlesWhenProvidersAgree : Script ()
-testCrossCheckSettlesWhenProvidersAgree = do
+testCrossCheckSettlesWhenDistributorsAgree : Script ()
+testCrossCheckSettlesWhenDistributorsAgree = do
   oracleDirect <- allocateParty "OracleDirect"
   oracleMM     <- allocateParty "OracleMarketMaker"
   seller       <- allocateParty "Seller"
@@ -158,7 +158,7 @@ testCrossCheckSettlesWhenProvidersAgree = do
   directCid <- submit oracleDirect $ createCmd DirectQuote with
     oracle = oracleDirect, feedId = "BTC/USD", assetPair = "BTC/USD"
     price = 65000.0, priceTime = now, publishedAt = now
-  -- Mid of 64998/65006 is 65002, ten dollars above the direct provider.
+  -- Mid of 64998/65006 is 65002, ten dollars above the direct distributor.
   mmCid <- submit oracleMM $ createCmd MarketMakerQuote with
     oracle = oracleMM, feedId = "BTC/USD", assetPair = "BTC/USD"
     bid = 64998.0, ask = 65006.0, priceTime = now, publishedAt = now
@@ -178,10 +178,10 @@ testCrossCheckSettlesWhenProvidersAgree = do
   s.distributorA   === oracleDirect
   s.distributorB   === oracleMM
 
--- | When two providers disagree beyond tolerance, the cross-check aborts rather
--- than settle on a contested price.
-testCrossCheckRejectsWhenProvidersDisagree : Script ()
-testCrossCheckRejectsWhenProvidersDisagree = do
+-- | When two distributors disagree beyond tolerance, the cross-check aborts
+-- instead of settling on a contested price.
+testCrossCheckRejectsWhenDistributorsDisagree : Script ()
+testCrossCheckRejectsWhenDistributorsDisagree = do
   oracleDirect <- allocateParty "OracleDirect"
   oracleMM     <- allocateParty "OracleMarketMaker"
   seller       <- allocateParty "Seller"
@@ -191,7 +191,7 @@ testCrossCheckRejectsWhenProvidersDisagree = do
   directCid <- submit oracleDirect $ createCmd DirectQuote with
     oracle = oracleDirect, feedId = "BTC/USD", assetPair = "BTC/USD"
     price = 65000.0, priceTime = now, publishedAt = now
-  -- Mid of 69999/70001 is 70000, five thousand above the direct provider.
+  -- Mid of 69999/70001 is 70000, five thousand above the direct distributor.
   mmCid <- submit oracleMM $ createCmd MarketMakerQuote with
     oracle = oracleMM, feedId = "BTC/USD", assetPair = "BTC/USD"
     bid = 69999.0, ask = 70001.0, priceTime = now, publishedAt = now
@@ -207,4 +207,4 @@ testCrossCheckRejectsWhenProvidersDisagree = do
   expectAbort
     (trySubmit (actAs buyer <> disclose discA <> disclose discB)
        (exerciseCmd offerCid AcceptCrossCheck))
-    "providers disagree beyond tolerance"
+    "distributors disagree beyond tolerance"

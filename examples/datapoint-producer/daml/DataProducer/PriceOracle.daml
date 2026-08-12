@@ -1,10 +1,10 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | A reference producer for the Data Standard. It shows the whole of a
--- provider's obligation: implement `PublishedData` on a template the provider
--- signs. A consumer of the standard reads the result without depending on this
--- package.
+-- | A reference producer for the Data Standard. A distributor's obligation is
+-- one thing, and this module is all of it: implement `PublishedDataPoint` on a
+-- template the distributor signs. A consumer of the standard reads the result
+-- without depending on this package.
 module DataProducer.PriceOracle where
 
 import qualified DA.TextMap as TM
@@ -14,14 +14,14 @@ import DataStandard.Utils
 
 -- | A published asset-pair price.
 --
--- The template deliberately has no observers: a reader that is not a
--- stakeholder obtains the contract through explicit disclosure and reads it by
--- exercising `PublishedData_Fetch`, which keeps the cost of publishing
--- independent of the size of the audience.
+-- The template has no observers, on purpose. A reader that is not a stakeholder
+-- obtains the contract through explicit disclosure and reads it by exercising
+-- `PublishedDataPoint_Fetch`, so publishing costs the same whether one consumer
+-- reads the price or a thousand do.
 template PublishedPrice
   with
     oracle    : Party
-      -- ^ The provider; signs and owns the publication.
+      -- ^ The distributor; signs and owns the publication.
     assetPair : Text
       -- ^ The feed this price is for, for example "BTC/USD".
     price     : Decimal
@@ -30,8 +30,8 @@ template PublishedPrice
   where
     signatory oracle
 
-    interface instance PublishedData for PublishedPrice where
-      view = PublishedDataView with
+    interface instance PublishedDataPoint for PublishedPrice where
+      view = PublishedDataPointView with
         distributor   = oracle
         publishedAt   = at
         schemaVersion = "1.0.0"
@@ -42,9 +42,9 @@ template PublishedPrice
           values = TM.fromList [("exampleoracle.com/source", "reference-implementation")]
 
     -- | Publish a fresh price by archiving this contract and creating its
-    -- replacement. Because the old publication is archived, a consumer holding
-    -- its contract id fails fast rather than reading a stale price; revoking a
-    -- feed is the same operation with no replacement created.
+    -- replacement. Archiving the old publication is what makes a consumer
+    -- holding its contract id fail fast instead of reading a stale price.
+    -- Revoking a feed is the same operation with no replacement created.
     choice UpdatePrice : ContractId PublishedPrice
       with
         newPrice : Decimal

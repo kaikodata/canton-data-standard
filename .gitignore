@@ -2,4 +2,4 @@
 .vscode/
 .DS_Store
 *.dar
-!dependencies/*.dar
+!dars/*.dar

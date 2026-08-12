@@ -1,0 +1,21 @@
+sdk-version: 3.4.11
+name: canton-data-standard-codecs
+source: daml
+version: 0.2.0
+dependencies:
+  - daml-prim
+  - daml-stdlib
+data-dependencies:
+  - ../canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.2.0.dar
+  - ../canton-data-standard-distributor-key-v1/.daml/dist/canton-data-standard-distributor-key-v1-0.2.0.dar
+build-options:
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches
+  - --target=2.1
+  # Any two versions of a utility package are smart-contract-upgrade compatible,
+  # which is why this package has no -v1 suffix and why the standard's fixable
+  # code belongs here instead of in an interface package.
+  - --force-utility-package=yes
+  # Needed only by DataStandard.Codecs.Verify, the one module that calls the
+  # alpha secp256k1 builtin. The hashing modules use the stable DA.Text.sha256.
+  - -Wno-crypto-text-is-alpha

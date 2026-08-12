@@ -29,13 +29,8 @@ jobs:
       - name: Install pinned Daml SDK
         run: dpm install 3.4.11
 
-      - name: Check headers, build, validate and test
+      # `make ci` includes dars-check, which rebuilds from source and proves
+      # the committed dars/ are in sync (package-id comparison). The committed
+      # DARs are the distribution channel, so no artifact upload is needed.
+      - name: Check headers, build, validate, test and verify committed DARs
         run: make ci
-
-      - name: Publish interface DARs as build artifacts
-        uses: actions/upload-artifact@v5
-        with:
-          name: canton-data-standard-dars
-          path: interfaces/*/.daml/dist/*.dar
-          include-hidden-files: true
-          if-no-files-found: error

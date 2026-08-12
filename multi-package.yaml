@@ -1,37 +1,32 @@
-# Build order for the standard's packages. Interface packages live under
-# interfaces/ (one package per interface version); examples and tests build
-# against their compiled DARs. The free path (quote verifier + free examples +
-# tests) carries no token-standard dependency, so its tests DAR runs under the
-# live Ledger API gate; the paid path (paid quote verifier + paid examples +
-# tests-paid) is token-coupled and exercised in-memory.
+# Build order for the standard's packages. The interface packages and the codec
+# library live under interfaces/ (one package per interface version, plus the
+# version-free utility library); examples and tests build against their compiled
+# DARs.
+#
+# Every package here depends only on daml-prim/daml-stdlib and on other packages
+# in this repo. The standard has no third-party dependency at all, so a consumer
+# vendors these DARs and nothing else.
+#
+# The `tests` suite is both token-free and crypto-free, so its DAR runs under the
+# live Ledger API gate. `tests-codecs` proves the hashing surface needs no
+# alpha-crypto flag, and `tests-crypto` covers the signature checks; both are
+# in-memory only, because Daml Script's keypair helpers cannot load on the live
+# runner.
 packages:
 - ./interfaces/canton-data-standard-utils-v1
 - ./interfaces/canton-data-standard-datapoint-v1
 - ./interfaces/canton-data-standard-quote-v1
-- ./interfaces/canton-data-standard-quote-verifier-audit-v1
-- ./interfaces/canton-data-standard-quote-verifier-v1
-- ./interfaces/canton-data-standard-paid-quote-verifier-audit-v1
-- ./interfaces/canton-data-standard-paid-quote-verifier-v1
-- ./interfaces/canton-data-standard-datapoint-verifier-audit-v1
-- ./interfaces/canton-data-standard-datapoint-verifier-v1
-- ./interfaces/canton-data-standard-paid-datapoint-verifier-audit-v1
-- ./interfaces/canton-data-standard-paid-datapoint-verifier-v1
+- ./interfaces/canton-data-standard-distributor-key-v1
+- ./interfaces/canton-data-standard-codecs
 - ./examples/datapoint-producer
 - ./examples/datapoint-consumer
 - ./examples/quote-producer
 - ./examples/quote-consumer
-- ./examples/switching-provider-direct
-- ./examples/switching-provider-marketmaker
+- ./examples/switching-distributor-direct
+- ./examples/switching-distributor-marketmaker
 - ./examples/switching-consumer
-- ./examples/verifier-producer
-- ./examples/verifier-consumer
-- ./examples/paid-verifier-producer
-- ./examples/paid-verifier-consumer
-- ./examples/datapoint-verifier-producer
-- ./examples/datapoint-verifier-consumer
-- ./examples/paid-datapoint-verifier-producer
-- ./examples/paid-datapoint-verifier-consumer
-- ./examples/test-token-registry
+- ./examples/distributor-key-producer
+- ./examples/distributor-key-consumer
 - ./tests
+- ./tests-codecs
 - ./tests-crypto
-- ./tests-paid

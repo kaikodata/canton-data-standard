@@ -1,0 +1,203 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for `verifyDataPoint`/`verifyDataPointWith` against real secp256k1 keys,
+-- mirroring `Test.VerifyQuoteTest` on the generic payload shape.
+--
+-- The data point side adds two things the quote side has no analogue for: the
+-- signature commits to `schemaVersion`, so authentic values cannot be re-presented
+-- under a different schema, and the payload is a recursive value tree, so the tests
+-- tamper inside a nested map as well as at the top level.
+module Test.VerifyDataPointTest where
+
+import DA.Assert ((===))
+import qualified DA.TextMap as TM
+import DA.Time (addRelTime, milliseconds)
+import Daml.Script
+
+import DataStandard.Codecs.Envelope
+  ( dataPointHashCodecId, hashSignedDataPoint, quoteHashCodecId )
+import DataStandard.Codecs.StructuralHash (epoch)
+import DataStandard.Codecs.Verify (verifyDataPoint, verifyDataPointWith)
+import DataStandard.DistributorKeyV1 (DistributorKeyView(..))
+import DataStandard.Utils (AnyValue(..), SignedDataPoint(..))
+
+fromMillis : Int -> Time
+fromMillis ms = addRelTime epoch (milliseconds ms)
+
+t0 : Time
+t0 = fromMillis 1768480245000
+
+t1 : Time
+t1 = fromMillis 1768483845000
+
+-- | The golden data point payload, whose root hash is the normative `gvEnvelope`
+-- and the payload the external Python signature fixture was made over.
+goldenPayload : SignedDataPoint
+goldenPayload = SignedDataPoint with
+  publishedAt = t0
+  expiresAt = t1
+  schemaVersion = "1.0.0"
+  values = TM.fromList [("feedId", AVText "EUR/USD"), ("rate", AVDecimal 1.0875)]
+
+-- | The normative root hash of `goldenPayload`.
+goldenPayloadHash : Text
+goldenPayloadHash = "1ac5fa4ba0227c3e348464699c40b5f313ffbae4c12943e544d2e44d176b575c"
+
+data DataPointFixture = DataPointFixture with
+    distributor : Party
+    keyPair : Secp256k1KeyPair
+    signature : Text
+
+setupDataPoint : Script DataPointFixture
+setupDataPoint = do
+  distributor <- allocateParty "Distributor"
+  keyPair <- secp256k1generatekeypair
+  signature <- signDataPoint keyPair.privateKey goldenPayload
+  pure DataPointFixture with distributor, keyPair, signature
+
+signDataPoint : Text -> SignedDataPoint -> Script Text
+signDataPoint privateKey payload =
+  secp256k1sign privateKey (hashSignedDataPoint payload).value
+
+dataPointKeyView : Party -> Text -> DistributorKeyView
+dataPointKeyView distributor publicKey = DistributorKeyView with
+  distributor
+  publicKey
+  signMethod = "secp256k1"
+  hashMethod = "SHA-256"
+  payloadCodec = dataPointHashCodecId
+
+expectLeft : Text -> Either Text a -> Script ()
+expectLeft expected result = case result of
+  Left err -> err === expected
+  Right _ -> abort ("expected failure: " <> expected)
+
+expectRight : Either Text a -> Script a
+expectRight result = case result of
+  Left err -> abort ("expected success, got: " <> err)
+  Right v -> pure v
+
+testVerifyDataPointHappyPath : Script ()
+testVerifyDataPointHappyPath = do
+  f <- setupDataPoint
+  v <- expectRight
+    (verifyDataPointWith f.distributor f.keyPair.publicKey t0 goldenPayload f.signature)
+  v.distributor === f.distributor
+  v.publishedAt === t0
+  v.schemaVersion === "1.0.0"
+  TM.lookup "feedId" v.values === Some (AVText "EUR/USD")
+  TM.lookup "rate" v.values === Some (AVDecimal 1.0875)
+  v.canonicalHash === goldenPayloadHash
+  v.signature === f.signature
+  v.publicKey === f.keyPair.publicKey
+
+testVerifyDataPointThroughKeyView : Script ()
+testVerifyDataPointThroughKeyView = do
+  f <- setupDataPoint
+  let key = dataPointKeyView f.distributor f.keyPair.publicKey
+  v <- expectRight (verifyDataPoint key t0 goldenPayload f.signature)
+  v.distributor === f.distributor
+  v.canonicalHash === goldenPayloadHash
+
+testExpiryBoundaryIsInclusive : Script ()
+testExpiryBoundaryIsInclusive = do
+  f <- setupDataPoint
+  v <- expectRight
+    (verifyDataPointWith f.distributor f.keyPair.publicKey t1 goldenPayload f.signature)
+  v.canonicalHash === goldenPayloadHash
+  expectLeft "payload expired"
+    (verifyDataPointWith f.distributor f.keyPair.publicKey (addRelTime t1 (milliseconds 1))
+      goldenPayload f.signature)
+
+testPublishedAfterExpiryRejected : Script ()
+testPublishedAfterExpiryRejected = do
+  distributor <- allocateParty "Distributor"
+  keyPair <- secp256k1generatekeypair
+  let payload = goldenPayload with publishedAt = t1, expiresAt = t0
+  signature <- signDataPoint keyPair.privateKey payload
+  expectLeft "published after expiry"
+    (verifyDataPointWith distributor keyPair.publicKey t0 payload signature)
+
+testExpiredPayloadRejected : Script ()
+testExpiredPayloadRejected = do
+  f <- setupDataPoint
+  _ <- expectRight
+    (verifyDataPointWith f.distributor f.keyPair.publicKey t0 goldenPayload f.signature)
+  expectLeft "payload expired"
+    (verifyDataPointWith f.distributor f.keyPair.publicKey (addRelTime t1 (milliseconds 1))
+      goldenPayload f.signature)
+
+-- Every leaf of the value tree is inside the hash: editing a value, renaming a
+-- field, adding a field, or dropping one all invalidate the signature.
+testTamperedValuesRejected : Script ()
+testTamperedValuesRejected = do
+  f <- setupDataPoint
+  let check payload = expectLeft "invalid signature"
+        (verifyDataPointWith f.distributor f.keyPair.publicKey t0 payload f.signature)
+  check (goldenPayload with values = TM.insert "rate" (AVDecimal 1.0876) goldenPayload.values)
+  check (goldenPayload with values = TM.insert "extra" (AVBool True) goldenPayload.values)
+  check (goldenPayload with values = TM.delete "rate" goldenPayload.values)
+  -- The value's type is part of the hash too, thanks to the constructor tags: the
+  -- same rate held as text is a different payload.
+  check (goldenPayload with values = TM.insert "rate" (AVText "1.0875") goldenPayload.values)
+
+-- The schema version is signed, so authentic values cannot be re-presented under a
+-- different schema.
+testTamperedSchemaRejected : Script ()
+testTamperedSchemaRejected = do
+  f <- setupDataPoint
+  expectLeft "invalid signature"
+    (verifyDataPointWith f.distributor f.keyPair.publicKey t0
+      (goldenPayload with schemaVersion = "2.0.0") f.signature)
+
+testWrongKeyRejected : Script ()
+testWrongKeyRejected = do
+  f <- setupDataPoint
+  other <- secp256k1generatekeypair
+  expectLeft "invalid signature"
+    (verifyDataPointWith f.distributor other.publicKey t0 goldenPayload f.signature)
+  otherSig <- signDataPoint other.privateKey goldenPayload
+  expectLeft "invalid signature"
+    (verifyDataPointWith f.distributor f.keyPair.publicKey t0 goldenPayload otherSig)
+
+-- A quote key does not verify data points, and the codec is checked first.
+testUnsupportedCodecRejected : Script ()
+testUnsupportedCodecRejected = do
+  f <- setupDataPoint
+  let quoteKey = (dataPointKeyView f.distributor f.keyPair.publicKey) with
+        payloadCodec = quoteHashCodecId
+  expectLeft "unsupported payload codec" (verifyDataPoint quoteKey t0 goldenPayload f.signature)
+  expectLeft "unsupported payload codec"
+    (verifyDataPoint quoteKey (addRelTime t1 (milliseconds 1)) goldenPayload f.signature)
+
+-- A nested value tree round-trips through signing and verification, so the
+-- recursive part of the hash is exercised against a real signature and not only
+-- against the golden vectors.
+testNestedPayloadVerifies : Script ()
+testNestedPayloadVerifies = do
+  distributor <- allocateParty "Distributor"
+  keyPair <- secp256k1generatekeypair
+  let payload = SignedDataPoint with
+        publishedAt = t0
+        expiresAt = t1
+        schemaVersion = "index-1.0.0"
+        values = TM.fromList
+          [ ("indexId", AVText "KK_IDX")
+          , ("constituents", AVList
+              [ AVMap (TM.fromList [("symbol", AVText "AAA"), ("weight", AVDecimal 0.6)])
+              , AVMap (TM.fromList [("symbol", AVText "BBB"), ("weight", AVDecimal 0.4)])
+              ])
+          ]
+  signature <- signDataPoint keyPair.privateKey payload
+  v <- expectRight (verifyDataPointWith distributor keyPair.publicKey t0 payload signature)
+  v.canonicalHash === (hashSignedDataPoint payload).value
+  -- Reordering a nested list changes the payload: list order is part of the hash.
+  let reorderedConstituents = AVList
+        [ AVMap (TM.fromList [("symbol", AVText "BBB"), ("weight", AVDecimal 0.4)])
+        , AVMap (TM.fromList [("symbol", AVText "AAA"), ("weight", AVDecimal 0.6)])
+        ]
+      reordered = payload with
+        values = TM.insert "constituents" reorderedConstituents payload.values
+  expectLeft "invalid signature"
+    (verifyDataPointWith distributor keyPair.publicKey t0 reordered signature)

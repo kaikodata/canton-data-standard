@@ -14,7 +14,7 @@ import DataConsumer.Trading
 import DataProducer.PriceOracle
 import QuoteConsumer.Trading
 import QuoteProducer.PriceOracle
-import DataStandard.DataPointV1 (PublishedData)
+import DataStandard.DataPointV1 (PublishedDataPoint)
 import DataStandard.QuoteV1 (PublishedQuote)
 import DataStandard.Utils (emptyMetadata)
 import Test.Fixtures
@@ -30,7 +30,7 @@ testConsumerTradesOffProducersPrice = do
   offerCid <- submit seller $ createCmd TradeOffer with
     seller, buyer, assetPair = "BTC/USD", quantity = 0.5
     expectedDistributor = oracle, maxQuoteAge = hours 24
-    priceDataCid = toInterfaceContractId @PublishedData priceCid
+    priceDataCid = toInterfaceContractId @PublishedDataPoint priceCid
   Some disc <- queryDisclosure oracle priceCid
   settlementCid <- submit (actAs buyer <> disclose disc) $
     exerciseCmd offerCid AcceptTrade
@@ -50,7 +50,7 @@ testConsumerRejectsWrongAssetPair = do
   offerCid <- submit seller $ createCmd TradeOffer with
     seller, buyer, assetPair = "BTC/USD", quantity = 0.5
     expectedDistributor = oracle, maxQuoteAge = hours 24
-    priceDataCid = toInterfaceContractId @PublishedData priceCid
+    priceDataCid = toInterfaceContractId @PublishedDataPoint priceCid
   Some disc <- queryDisclosure oracle priceCid
   submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade) "asset pair mismatch"
 
@@ -64,7 +64,7 @@ testUpdateRequiresIncreasingTime = do
     (exerciseCmd priceCid UpdatePrice with newPrice = 66000.0, newAt = now)
     "publication time must increase"
 
--- TestFeed is a valid PublishedData implementation with a different schema:
+-- TestFeed is a valid PublishedDataPoint implementation with a different schema:
 -- it carries no "assetPair" field.
 testConsumerRejectsForeignSchema : Script ()
 testConsumerRejectsForeignSchema = do
@@ -78,7 +78,7 @@ testConsumerRejectsForeignSchema = do
   offerCid <- submit seller $ createCmd TradeOffer with
     seller, buyer, assetPair = "BTC/USD", quantity = 0.5
     expectedDistributor = oracle, maxQuoteAge = hours 24
-    priceDataCid = toInterfaceContractId @PublishedData feedCid
+    priceDataCid = toInterfaceContractId @PublishedDataPoint feedCid
   Some disc <- queryDisclosure oracle feedCid
   submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade)
     "published data missing field: assetPair"
@@ -94,11 +94,12 @@ testProducerUpdatesPrice = do
   old <- queryContractId oracle priceCid
   assertMsg "stale publication must be archived" (isNone old)
   Some v <- queryInterfaceContractId oracle
-    (toInterfaceContractId @PublishedData newCid)
+    (toInterfaceContractId @PublishedDataPoint newCid)
   v.publishedAt === addRelTime now (minutes 1)
 
 -- An offer snapshots a specific contract id, so a producer refresh archives
 -- it and the late accept fails outright instead of trading on stale data.
+-- The quote path has the same behaviour; see `testQuoteAcceptFailsAfterRefresh`.
 testAcceptFailsAfterPriceRefresh : Script ()
 testAcceptFailsAfterPriceRefresh = do
   oracle <- allocateParty "ExampleOracle"
@@ -110,7 +111,7 @@ testAcceptFailsAfterPriceRefresh = do
   offerCid <- submit seller $ createCmd TradeOffer with
     seller, buyer, assetPair = "BTC/USD", quantity = 0.5
     expectedDistributor = oracle, maxQuoteAge = hours 24
-    priceDataCid = toInterfaceContractId @PublishedData priceCid
+    priceDataCid = toInterfaceContractId @PublishedDataPoint priceCid
   Some disc <- queryDisclosure oracle priceCid
   _ <- submit oracle $ exerciseCmd priceCid UpdatePrice with
     newPrice = 66000.0, newAt = addRelTime now (minutes 1)
@@ -184,8 +185,8 @@ testProducerUpdatesQuote = do
   v.quote.priceTime === observed
   v.publishedAt     === published
 
--- An offer snapshots a specific contract id, so a producer refresh archives
--- it and the late accept fails outright instead of trading on stale data.
+-- The quote counterpart: the refresh archives the id the offer snapshotted, and
+-- the late accept fails outright rather than trading on a stale quote.
 testQuoteAcceptFailsAfterRefresh : Script ()
 testQuoteAcceptFailsAfterRefresh = do
   oracle <- allocateParty "ExampleOracle"
@@ -206,8 +207,8 @@ testQuoteAcceptFailsAfterRefresh = do
     isContractNotFound "the refreshed quote's old contract id is gone"
 
 -- The data-point consumer rejects a publication from a distributor other than
--- the one the offer pins: the standard makes `distributor` authentic, trusting
--- it is the consumer's gate.
+-- the one the offer pins. The standard makes `distributor` authentic; deciding
+-- to trust it is the consumer's own gate.
 testDataConsumerRejectsUntrustedDistributor : Script ()
 testDataConsumerRejectsUntrustedDistributor = do
   oracle  <- allocateParty "ExampleOracle"
@@ -220,7 +221,7 @@ testDataConsumerRejectsUntrustedDistributor = do
   offerCid <- submit seller $ createCmd TradeOffer with
     seller, buyer, assetPair = "BTC/USD", quantity = 0.5
     expectedDistributor = other, maxQuoteAge = hours 24
-    priceDataCid = toInterfaceContractId @PublishedData priceCid
+    priceDataCid = toInterfaceContractId @PublishedDataPoint priceCid
   Some disc <- queryDisclosure oracle priceCid
   submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade) "untrusted distributor"
 
@@ -238,7 +239,7 @@ testDataConsumerRejectsStaleData = do
   offerCid <- submit seller $ createCmd TradeOffer with
     seller, buyer, assetPair = "BTC/USD", quantity = 0.5
     expectedDistributor = oracle, maxQuoteAge = hours 1
-    priceDataCid = toInterfaceContractId @PublishedData priceCid
+    priceDataCid = toInterfaceContractId @PublishedDataPoint priceCid
   Some disc <- queryDisclosure oracle priceCid
   submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade) "data too stale"
 
@@ -279,8 +280,8 @@ testQuoteConsumerRejectsStaleQuote = do
   Some disc <- queryDisclosure oracle quoteCid
   submitFailsWith buyer disc (exerciseCmd offerCid AcceptQuoteTrade) "quote too stale"
 
--- The data-point consumer rejects a publication stamped in the future: a
--- negative age must not read as fresh.
+-- The data-point consumer rejects a publication stamped in the future, so that a
+-- negative age cannot read as fresh.
 testDataConsumerRejectsFutureDatedData : Script ()
 testDataConsumerRejectsFutureDatedData = do
   oracle  <- allocateParty "ExampleOracle"
@@ -293,7 +294,7 @@ testDataConsumerRejectsFutureDatedData = do
   offerCid <- submit seller $ createCmd TradeOffer with
     seller, buyer, assetPair = "BTC/USD", quantity = 0.5
     expectedDistributor = oracle, maxQuoteAge = hours 24
-    priceDataCid = toInterfaceContractId @PublishedData priceCid
+    priceDataCid = toInterfaceContractId @PublishedDataPoint priceCid
   Some disc <- queryDisclosure oracle priceCid
   submitFailsWith buyer disc (exerciseCmd offerCid AcceptTrade) "data published in the future"
 

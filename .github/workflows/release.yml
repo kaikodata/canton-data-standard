@@ -1,0 +1,79 @@
+# Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Tag-triggered release: rebuilds every interface package from source, proves
+# the committed dars/ match the rebuild (package-id comparison), and attaches
+# exactly those DARs to a GitHub Release. The tag (e.g. v0.2.0) covers the
+# whole repo and is created by hand once the release PR has merged, refreshed
+# dars/ included.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The installer fetches the latest dpm release; the SDK the packages
+      # build with is pinned in the next step.
+      - name: Install dpm
+        run: |
+          curl -sSL https://get.digitalasset.com/install/install.sh | sh
+          echo "$HOME/.dpm/bin" >> "$GITHUB_PATH"
+
+      - name: Install pinned Daml SDK
+        run: |
+          SDK_VERSION=$(grep '^sdk-version:' interfaces/canton-data-standard-utils-v1/daml.yaml | awk '{print $2}')
+          dpm install "$SDK_VERSION"
+
+      - name: Rebuild from source and prove committed DARs match
+        run: make headers-check build validate dars-check
+
+      - name: Generate checksums
+        run: cd dars && sha256sum *.dar > SHA256SUMS
+
+      - name: Write release notes
+        run: |
+          {
+            echo "# Canton Data Standard ${GITHUB_REF_NAME}"
+            echo
+            echo "DARs attached below are the ones committed in \`dars/\`, proven"
+            echo "identical to a from-source rebuild by \`make dars-check\` in this run."
+            echo
+            echo "## DAR package ids"
+            echo '```'
+            for d in dars/*.dar; do
+              echo "$(basename "$d"): $(dpm inspect-dar "$d" --json | jq -r .main_package_id)"
+            done
+            echo '```'
+            echo
+            echo "## SHA-256"
+            echo '```'
+            cat dars/SHA256SUMS
+            echo '```'
+            echo
+            echo "Commit: ${GITHUB_SHA}"
+          } > release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          files: |
+            dars/*.dar
+            dars/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,169 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The normative golden vectors for the structural hash.
+--
+-- Every literal in this module was produced by a separate Python implementation
+-- written from the scheme definition alone, with no reference to this Daml code.
+-- A green run is therefore evidence of the standard's central implementability
+-- claim: a signer outside Daml, given only the written scheme, computes the same
+-- hashes this library does.
+--
+-- The vectors are normative. A mismatch means the Daml implementation is wrong,
+-- and never that a vector should be adjusted.
+--
+-- The suite has no crypto dependency: the hashing surface uses the stable
+-- `DA.Text.sha256`, so this package builds with no alpha-crypto flag. Part of
+-- what the suite proves is simply that it compiles.
+module Test.GoldenVectorsTest where
+
+import DA.Assert ((===))
+import qualified DA.TextMap as TM
+import DA.Time (addRelTime, milliseconds)
+import Daml.Script
+
+import DataStandard.Codecs.Envelope (hashSignedDataPoint, hashSignedQuote)
+import DataStandard.Codecs.QuoteValues (quoteToValues)
+import DataStandard.Codecs.StructuralHash (Hashable(hash), epoch, timeToMillis)
+import DataStandard.Utils (AnyValue(..), Quote(..), SignedDataPoint(..), SignedQuote(..))
+
+-- | 2026-01-15T12:30:45Z, the envelope vectors' publication instant. Built from
+-- epoch milliseconds rather than a calendar date, because that is the rendering
+-- the hash commits to and the form the vector contract states it in.
+t0 : Time
+t0 = fromMillis 1768480245000
+
+-- | T0 + 1h, the envelope vectors' expiry instant.
+t1 : Time
+t1 = fromMillis 1768483845000
+
+fromMillis : Int -> Time
+fromMillis ms = addRelTime epoch (milliseconds ms)
+
+-- | The scalar renderings the whole scheme rests on. Pinned as a table, because a
+-- signer in another language reproduces the hash only if it reproduces these
+-- exactly. Daml's shortest-exact-form `Decimal` is the one to watch: it renders
+-- 65000.0 with one fractional digit and never with trailing zero padding.
+testShowRenderings : Script ()
+testShowRenderings = do
+  show (42 : Int) === "42"
+  show (-5 : Int) === "-5"
+  show (1.0875 : Decimal) === "1.0875"
+  show (65000.0 : Decimal) === "65000.0"
+  show (-12.5 : Decimal) === "-12.5"
+  show (0.6 : Decimal) === "0.6"
+  show (0.4 : Decimal) === "0.4"
+  show (1.0825 : Decimal) === "1.0825"
+  timeToMillis epoch === 0
+  timeToMillis t0 === 1768480245000
+  timeToMillis t1 === 1768483845000
+
+-- | The eight tagged scalar vectors, one per `AnyValue` scalar constructor plus
+-- the empty text and the epoch instant.
+testGoldenScalars : Script ()
+testGoldenScalars = do
+  (hash (AVInt 42)).value === "fbc765b8955607095f92d0ba970ba6e86750bfb205c571f556cb381769f91918"
+  (hash (AVInt (-5))).value === "5b643cbb8f67a1eab5f073e71c9f674a170162d4581d52c4787d3e223202fe4e"
+  (hash (AVDecimal 1.0875)).value === "213e2cdace532d6887c5c46d7f45b05ead8d2d51ab3bb7bf03372a172e6e98a1"
+  (hash (AVDecimal 65000.0)).value === "a2bb331f14bafc288a8988105e60be2dd290cc6a7e7adc8dfadc52bd27279f80"
+  (hash (AVText "EUR/USD")).value === "657d9605f00be8259279880447a5889be12f4c2d968722609e56c289ed0c4751"
+  (hash (AVText "")).value === "211468a63cd5d4a03977b9f390cd347d19aca0ac7dcb82d8dd93060c66a07ae1"
+  (hash (AVBool True)).value === "13c46a363e251ace723eded1568faddac200fcc9b576881e9bdda466bdbf3e05"
+  (hash (AVTime epoch)).value === "ef2eaacbb2b364f08d4c216f5d35cd6b73f9d891075a8f26acd3e293221db407"
+
+-- | A flat map of one value of every scalar type, including negatives.
+testGoldenFlat : Script ()
+testGoldenFlat = do
+  let values = TM.fromList
+        [ ("t", AVText "hi")
+        , ("b", AVBool True)
+        , ("i", AVInt (-5))
+        , ("d", AVDecimal (-12.5))
+        , ("w", AVTime epoch)
+        ]
+  (hash (AVMap values)).value === "61f6c963bfa4269ddb4a57f4bf8f606d5a6097370d437c934cd3fefc8e728c4e"
+
+-- | A list of maps, the index-constituents shape: the vector that exercises
+-- recursion through both container kinds at once.
+testGoldenNested : Script ()
+testGoldenNested = do
+  let values = TM.fromList
+        [ ("constituents", AVList
+            [ AVMap (TM.fromList [("symbol", AVText "AAA"), ("weight", AVDecimal 0.6)])
+            , AVMap (TM.fromList [("symbol", AVText "BBB"), ("weight", AVDecimal 0.4)])
+            ])
+        ]
+  (hash (AVMap values)).value === "4831df89730ffabc463ad33223e7ac285cec422ae6853bc0ad8018123f636e7c"
+
+-- | Astral-plane and prefix-pair keys: the sort-order lock. "z" (U+007A) sorts
+-- before U+E000 (private use) sorts before U+1F600 (GRINNING FACE) in code-point
+-- order, which is also raw UTF-8 byte order. A signer that sorted by UTF-16 code
+-- unit would place the astral key (surrogate pair D83D DE00) before U+E000 and
+-- produce a different hash, so this vector is the one that catches it.
+testGoldenKeyOrder : Script ()
+testGoldenKeyOrder = do
+  let astral = TM.fromList [("z", AVInt 1), ("\x1F600", AVInt 2), ("\xE000", AVInt 3)]
+  (hash (AVMap astral)).value === "40f79fe9fff386ffcd3b43e99bad2e09885e7de46373f5030edd105fcae3bb47"
+  let prefix = TM.fromList [("ab", AVInt 2), ("a", AVInt 1)]
+  (hash (AVMap prefix)).value === "24bb64d58548c367e1a291e7157b2d0d9928feafa0248791411d979ffb329475"
+
+-- | An empty list and an empty map, each pinned. They are distinct only because
+-- of the constructor tags; without them both would hash as the empty list.
+testGoldenEmptyContainers : Script ()
+testGoldenEmptyContainers = do
+  let emptyList = TM.fromList [("x", AVList [])]
+      emptyMap = TM.fromList [("x", AVMap TM.empty)]
+  (hash (AVMap emptyList)).value === "1adbed55b769d9d21cd806bf447a31697295b7557d19c2d7d796aedf36338239"
+  (hash (AVMap emptyMap)).value === "027de5bc84e5f13ca54b3c88071f916820269b8db5f62375ffb3a995936280fa"
+
+-- | The data point envelope over a EUR/USD reference rate: the vector an external
+-- signer's end-to-end test targets, and the payload the Python-produced signature
+-- fixture in `tests-crypto` was made over.
+testGoldenDataPointEnvelope : Script ()
+testGoldenDataPointEnvelope = do
+  let payload = SignedDataPoint with
+        publishedAt = t0
+        expiresAt = t1
+        schemaVersion = "1.0.0"
+        values = TM.fromList [("feedId", AVText "EUR/USD"), ("rate", AVDecimal 1.0875)]
+  (hashSignedDataPoint payload).value === "1ac5fa4ba0227c3e348464699c40b5f313ffbae4c12943e544d2e44d176b575c"
+
+-- | A quote carried through the quote-to-values codec and hashed as a generic data
+-- point. Pins the codec's output shape into the vector set: any change to the
+-- field names or tags `quoteToValues` emits breaks this hash.
+testGoldenQuoteThroughValues : Script ()
+testGoldenQuoteThroughValues = do
+  let quote = Quote with feedId = "BTC/USD", price = 65000.0, priceTime = t0
+      payload = SignedDataPoint with
+        publishedAt = t0
+        expiresAt = t1
+        schemaVersion = "quote-1"
+        values = quoteToValues quote
+  (hashSignedDataPoint payload).value === "156a45a913599d7597df9e065d9f5b3dd57b41d5910da81e148368c9061de19e"
+
+-- | The typed quote envelope: the same quote hashed as a typed record, with no
+-- schema string. This is what a quote signature commits to.
+testGoldenQuoteEnvelope : Script ()
+testGoldenQuoteEnvelope = do
+  let payload = SignedQuote with
+        publishedAt = t0
+        expiresAt = t1
+        quote = Quote with feedId = "BTC/USD", price = 65000.0, priceTime = t0
+  (hashSignedQuote payload).value === "c6ef3856385d967474f7c84b2822b43c689ce5fd233e85c0d76680e3c907f138"
+
+-- | The quote envelope over the Go signer's own test fixture. Same envelope as
+-- above at the values the Go implementation signs in its tests, so the two
+-- implementations are pinned to one shared vector rather than to two vectors that
+-- happen to agree. Note the half-second `priceTime`, which is representable in
+-- epoch milliseconds and is the reason this fixture cannot be built from a
+-- whole-second calendar time.
+testGoldenQuoteEnvelopeGoFixture : Script ()
+testGoldenQuoteEnvelopeGoFixture = do
+  let payload = SignedQuote with
+        publishedAt = fromMillis 1717000005000
+        expiresAt = fromMillis 1717000605000
+        quote = Quote with
+          feedId = "KK_RFR_EURUSD"
+          price = 1.0825
+          priceTime = fromMillis 1717000004500
+  (hashSignedQuote payload).value === "61c440b8108e720c4a5fc4171ab34989f9769081090c63b081f0c11e0e8174d2"

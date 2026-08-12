@@ -12,7 +12,7 @@ import DataStandard.DataPointV1
 import DataStandard.QuoteV1
 import DataStandard.Utils
 
--- | A minimal `PublishedData` implementation, just enough to exercise the
+-- | A minimal `PublishedDataPoint` implementation, just enough to exercise the
 -- interface. The full example templates live in `examples/`.
 template TestFeed
   with
@@ -26,8 +26,8 @@ template TestFeed
     signatory oracle
     observer subscriber
 
-    interface instance PublishedData for TestFeed where
-      view = PublishedDataView with
+    interface instance PublishedDataPoint for TestFeed where
+      view = PublishedDataPointView with
         distributor   = oracle
         publishedAt   = at
         schemaVersion = "1.0.0"
@@ -64,7 +64,7 @@ template TestQuote
 
 -- | Expect the submission to abort with a message containing `needle`.
 -- Asserting the specific message proves the scenario fails for the intended
--- reason, not an incidental visibility or authorization error.
+-- reason, and not on an incidental visibility or authorization error.
 submitFailsWith : Party -> Disclosure -> Commands a -> Text -> Script ()
 submitFailsWith p d cmds = expectAbort (trySubmit (actAs p <> disclose d) cmds)
 
@@ -86,9 +86,9 @@ expectAbort run needle = do
            (needle `T.isInfixOf` shown)
 
 -- | Expect the submission to fail with a `SubmitError` that satisfies
--- `matches`, rather than with a particular error-message substring. Platform
+-- `matches`, instead of with a particular error-message substring. Platform
 -- error text can vary across ledger versions, so the negative tests in this
--- live-capable suite discriminate on the structured error constructor; the
+-- live-capable suite discriminate on the structured error constructor. The
 -- standard's own `assertMsg` messages are matched by text elsewhere, since
 -- those are fixed by this repository.
 submitFailsMatching : Party -> Disclosure -> Commands a -> (SubmitError -> Bool) -> Text -> Script ()

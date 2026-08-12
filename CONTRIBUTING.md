@@ -25,23 +25,34 @@ The `Makefile` wraps the common tasks, and `make ci` runs the full gate:
 
 ```bash
 make build          # dpm build --all
-make test           # the Daml Script test suite
+make test           # the Daml Script test suites
 make validate       # validate the built interface DARs
 make lint           # dlint over the Daml sources
 make headers-check  # every Daml file carries the license header
-make ci             # headers-check, build, validate and test
+make dars           # refresh the committed DARs in dars/ from a local build
+make dars-check     # prove the committed DARs match a from-source rebuild
+make ci             # headers-check, build, validate, test and dars-check
 ```
 
-Run `make ci` before opening a pull request.
+Run `make ci` before opening a pull request. If your change affects an
+interface package, run `make dars` and commit the refreshed DARs together with
+the source. `dars-check` fails CI when the committed DARs and the source drift
+apart.
 
 ## Conventions
 
 - Every Daml source file carries the SPDX header that `scripts/check-headers.sh`
   enforces. New files carry it too.
-- Exported types, choices, and fields carry doc comments. The exported API is
+- Exported types, choices, and fields have doc comments. The exported API is
   the product, so match the documentation style of the surrounding code.
-- A breaking change to an interface is a new `-v2` package, never an edit to a
+- A breaking change to an interface is a new `-v2` package, not an edit to a
   released `-v1`. See the versioning policy in the [README](README.md).
+- All executable code lives in the `canton-data-standard-codecs` utility
+  package, none of it in an interface package. An interface package holds
+  views and one-line fetch choices: it can never be upgraded, so any code in
+  it would be unfixable. The codecs package is built with
+  `--force-utility-package`, which makes any two of its versions
+  SCU-compatible, so bug fixes there are ordinary version bumps.
 
 ## License
 

@@ -4,10 +4,10 @@
 -- | A reference consumer for the Data Standard. It depends only on the
 -- interface package and names no producer's template. It is still written
 -- against a specific payload schema, the `assetPair` and `price` keys it reads
--- below, so it works with a provider that publishes that schema and rejects one
--- that does not. The interface removes the dependency on the producer's
--- package; agreeing on the payload schema is the separate step that
--- `schemaVersion` tracks.
+-- below, so it works with any distributor publishing that schema and rejects
+-- the rest. The interface removes the dependency on the producer's package;
+-- agreeing on the payload schema is the separate step that `schemaVersion`
+-- tracks.
 module DataConsumer.Trading where
 
 import DataStandard.DataPointV1
@@ -26,34 +26,34 @@ template TradeOffer
     quantity     : Decimal
     expectedDistributor : Party
       -- ^ The one distributor whose price the buyer accepts. The standard makes
-      -- the publication's `distributor` authentic, but trusting that party is the
-      -- consumer's decision, so the buyer pins it here and the accept gates on
-      -- it. The price source stays the counterparty's choice through the
-      -- referenced publication; this only fixes which distributor the buyer is
-      -- willing to settle on.
+      -- the publication's `distributor` authentic, but trusting that party is
+      -- the consumer's decision, so the buyer pins it here and the accept gates
+      -- on it. Which publication gets referenced is still the counterparty's
+      -- choice; this fixes only the distributor the buyer will settle on.
     maxQuoteAge : RelTime
-      -- ^ The largest age, now minus `publishedAt`, the buyer will settle on. The
-      -- publication carries no replay bound of its own, so this is the consumer's
+      -- ^ The largest age, now minus `publishedAt`, the buyer will settle on. A
+      -- publication has no replay bound of its own, so this is the consumer's
       -- own staleness policy.
-    priceDataCid : ContractId PublishedData
-      -- ^ Any `PublishedData` publication, identified through the interface
+    priceDataCid : ContractId PublishedDataPoint
+      -- ^ Any `PublishedDataPoint` publication, identified through the interface
       -- rather than a concrete template.
   where
     signatory seller
     observer buyer
 
     -- | Settle the trade at the published price, in the buyer's transaction.
-    -- The price is read through `PublishedData_Fetch`. Confirming the
-    -- publication is for the expected feed is the consumer's responsibility:
-    -- the standard authenticates the distributor, not the feed identity. The
-    -- buyer also gates the `distributor` against `expectedDistributor` and bounds
-    -- the age of `publishedAt` by `maxQuoteAge`, so an untrusted distributor or a
-    -- publication older than the buyer's policy aborts before settlement.
+    -- The price is read through `PublishedDataPoint_Fetch`. The standard
+    -- authenticates the distributor and says nothing about feed identity, so
+    -- confirming the publication is for the expected feed falls to the
+    -- consumer. The buyer also gates the `distributor` against
+    -- `expectedDistributor` and bounds the age of `publishedAt` by
+    -- `maxQuoteAge`, so an untrusted distributor or a publication older than the
+    -- buyer's policy aborts before settlement.
     choice AcceptTrade : ContractId TradeSettlement
       controller buyer
       do
         now <- getTime
-        v <- exercise priceDataCid PublishedData_Fetch with actor = buyer
+        v <- exercise priceDataCid PublishedDataPoint_Fetch with actor = buyer
         publishedPair <- required "assetPair" (lookupField "assetPair" v.values)
         assertMsg "asset pair mismatch" (publishedPair == assetPair)
         assertMsg "untrusted distributor" (v.distributor == expectedDistributor)

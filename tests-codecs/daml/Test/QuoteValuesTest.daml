@@ -1,0 +1,82 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The `Quote` to `Values` codec in both directions: that the round trip is
+-- lossless, and that the strict decode rejects every payload that is not exactly a
+-- quote.
+--
+-- The negative half is all about that strictness. A lenient decode that ignored
+-- an unrecognised field would let two different payloads decode to the same
+-- quote, which for a signed payload means a signature over one payload appearing
+-- to authenticate another.
+module Test.QuoteValuesTest where
+
+import DA.Assert ((===))
+import qualified DA.TextMap as TM
+import DA.Time (addRelTime, milliseconds)
+import Daml.Script
+
+import DataStandard.Codecs.QuoteValues (quoteToValues, valuesToQuote)
+import DataStandard.Codecs.StructuralHash (epoch)
+import DataStandard.Utils (AnyValue(..), Quote(..), Values)
+
+sampleQuote : Quote
+sampleQuote = Quote with
+  feedId = "BTC/USD"
+  price = 65000.0
+  priceTime = addRelTime epoch (milliseconds 1768480245000)
+
+-- | The tagged form of a quote: the three field names, each at its expected type.
+testQuoteToValuesShape : Script ()
+testQuoteToValuesShape = do
+  let values = quoteToValues sampleQuote
+  map fst (TM.toList values) === ["feedId", "price", "priceTime"]
+  TM.lookup "feedId" values === Some (AVText "BTC/USD")
+  TM.lookup "price" values === Some (AVDecimal 65000.0)
+  TM.lookup "priceTime" values === Some (AVTime sampleQuote.priceTime)
+
+-- | The round trip recovers the quote exactly, for a whole-number price and a
+-- fractional one.
+testRoundTrip : Script ()
+testRoundTrip = do
+  valuesToQuote (quoteToValues sampleQuote) === Right sampleQuote
+  let fractional = Quote with
+        feedId = "KK_RFR_EURUSD"
+        price = 1.0825
+        priceTime = addRelTime epoch (milliseconds 1717000004500)
+  valuesToQuote (quoteToValues fractional) === Right fractional
+
+-- | Every one of the three fields is required, and the message names the field that
+-- is missing rather than reporting a generic decode failure.
+testMissingFieldRejected : Script ()
+testMissingFieldRejected = do
+  valuesToQuote (withoutField "priceTime") === Left "missing field: priceTime"
+  valuesToQuote (withoutField "feedId") === Left "missing field: feedId"
+  valuesToQuote (withoutField "price") === Left "missing field: price"
+  where
+    withoutField : Text -> Values
+    withoutField key = TM.delete key (quoteToValues sampleQuote)
+
+-- | A field present at the wrong type is rejected, not coerced. A feed id held
+-- as an integer is the case that would otherwise decode to a surprising quote.
+testWrongTypeRejected : Script ()
+testWrongTypeRejected = do
+  valuesToQuote (withField "feedId" (AVInt 7)) === Left "wrong type for field: feedId"
+  valuesToQuote (withField "price" (AVText "65000.0")) === Left "wrong type for field: price"
+  valuesToQuote (withField "priceTime" (AVInt 1768480245000)) === Left "wrong type for field: priceTime"
+  where
+    withField : Text -> AnyValue -> Values
+    withField key v = TM.insert key v (quoteToValues sampleQuote)
+
+-- | An unrecognised field is rejected rather than ignored, so a payload carrying
+-- extra data cannot pass as the quote it happens to contain.
+testUnknownFieldRejected : Script ()
+testUnknownFieldRejected = do
+  let extended = TM.insert "bid" (AVDecimal 64999.0) (quoteToValues sampleQuote)
+  valuesToQuote extended === Left "unexpected field: bid"
+
+-- | An empty payload fails on the first required field, so the check order is
+-- fields-then-extras and the diagnostic is about what a quote needs.
+testEmptyValuesRejected : Script ()
+testEmptyValuesRejected =
+  valuesToQuote TM.empty === Left "missing field: feedId"
