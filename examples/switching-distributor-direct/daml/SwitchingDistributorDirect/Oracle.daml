@@ -1,0 +1,82 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | A reference producer for the distributor-switching demonstration: the
+-- ordinary oracle shape. It stores a price directly and implements both the
+-- typed `PublishedQuote` and the generic `PublishedDataPoint` interfaces on one
+-- template, so a consumer can read the same feed either way. The
+-- structurally different `SwitchingDistributorMarketMaker.Oracle` exposes the
+-- identical views from a different internal representation; a consumer reading
+-- through the interfaces cannot tell the two apart.
+module SwitchingDistributorDirect.Oracle where
+
+import qualified DA.TextMap as TM
+
+import DataStandard.DataPointV1
+import DataStandard.QuoteV1
+import DataStandard.Utils
+
+-- | A published price for a single feed, stored directly.
+--
+-- The template has no observers. A reader that is not a stakeholder obtains it
+-- through explicit disclosure and reads it through an interface's `_Fetch`
+-- choice, which is why the size of the audience does not change what publishing
+-- costs.
+template DirectQuote
+  with
+    oracle      : Party
+      -- ^ The distributor; signs and owns the publication.
+    feedId      : Text
+      -- ^ The feed this quote is for in the typed view, for example "BTC/USD".
+    assetPair   : Text
+      -- ^ The same feed under the key the generic payload uses. Held separately
+      -- from `feedId` so the two views can name the feed by their own
+      -- conventions; a distributor serving one feed sets them equal.
+    price       : Decimal
+      -- ^ The price exposed by both views, stored directly.
+    priceTime   : Time
+      -- ^ The market time the price is observed for.
+    publishedAt : Time
+      -- ^ When the quote was produced.
+  where
+    signatory oracle
+
+    interface instance PublishedQuote for DirectQuote where
+      view = PublishedQuoteView with
+        distributor = oracle
+        quote = Quote with
+          feedId
+          price
+          priceTime
+        publishedAt
+        metadata    = Metadata with
+          values = TM.fromList [("exampleoracle.com/source", "reference-implementation")]
+
+    interface instance PublishedDataPoint for DirectQuote where
+      view = PublishedDataPointView with
+        distributor   = oracle
+        publishedAt
+        schemaVersion = "1.0.0"
+        values        = insertField "assetPair" assetPair
+                      $ insertField "price"     price
+                        TM.empty
+        metadata      = Metadata with
+          values = TM.fromList [("exampleoracle.com/source", "reference-implementation")]
+
+    -- | Publish a fresh quote by archiving this contract and creating its
+    -- replacement. The archive is what makes a stale read impossible: a
+    -- consumer holding the old contract id fails fast. Revoking a feed is the
+    -- same operation with no replacement created.
+    choice UpdateDirectQuote : ContractId DirectQuote
+      with
+        newPrice       : Decimal
+        newPriceTime   : Time
+        newPublishedAt : Time
+          -- ^ Must be later than the current `publishedAt`.
+      controller oracle
+      do
+        assertMsg "publication time must increase" (newPublishedAt > publishedAt)
+        create this with
+          price       = newPrice
+          priceTime   = newPriceTime
+          publishedAt = newPublishedAt

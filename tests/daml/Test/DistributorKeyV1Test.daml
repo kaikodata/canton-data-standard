@@ -1,0 +1,132 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the `DistributorKey` interface: reading the view, the
+-- disclosure-gated `DistributorKey_Fetch` choice, and key rotation.
+--
+-- The interface publishes a key and does nothing else with it, so these tests
+-- verify no signatures at all. Signature checking is library code, exercised in
+-- `tests-crypto`. Keeping the interface's own tests crypto-free is what allows
+-- this suite's DAR to run against a live ledger, where the Daml Script crypto
+-- helpers are unavailable.
+module Test.DistributorKeyV1Test where
+
+import DA.Assert ((===))
+import DA.Optional (isNone, isSome)
+import Daml.Script
+
+import DataStandard.DistributorKeyV1
+import DistributorKeyProducer.Publication
+
+import Test.Fixtures
+
+-- A key fixture: hex DER-SPKI in shape, though nothing on this path checks it,
+-- since publishing a key involves no cryptography.
+samplePublicKey : Text
+samplePublicKey = "3056301006072a8648ce3d020106052b8104000a03420004aa"
+
+rotatedPublicKey : Text
+rotatedPublicKey = "3056301006072a8648ce3d020106052b8104000a03420004bb"
+
+publishKey : Party -> Script (ContractId DistributorKeyPublication)
+publishKey distributor = submit distributor $ createCmd DistributorKeyPublication with
+  distributor
+  publicKey = samplePublicKey
+  payloadCodec = "v2-quote-hash"
+
+testViewExposesKeyAndScheme : Script ()
+testViewExposesKeyAndScheme = do
+  distributor <- allocateParty "Distributor"
+  keyCid <- publishKey distributor
+  Some v <- queryInterfaceContractId distributor
+    (toInterfaceContractId @DistributorKey keyCid)
+  v.distributor === distributor
+  v.publicKey === samplePublicKey
+  v.signMethod === "secp256k1"
+  v.hashMethod === "SHA-256"
+  v.payloadCodec === "v2-quote-hash"
+
+-- The read path the standard exists for: a consumer that is no stakeholder of the
+-- publication obtains it through explicit disclosure and reads it by exercising
+-- the choice, which only the actor authorizes. The publication is not archived by
+-- the read, so one contract serves every consumer.
+testNonStakeholderReadsViaDisclosedFetch : Script ()
+testNonStakeholderReadsViaDisclosedFetch = do
+  distributor <- allocateParty "Distributor"
+  consumer <- allocateParty "Consumer"
+  keyCid <- publishKey distributor
+  Some disc <- queryDisclosure distributor keyCid
+  v <- submit (actAs consumer <> disclose disc) $
+    exerciseCmd (toInterfaceContractId @DistributorKey keyCid)
+      DistributorKey_Fetch with actor = consumer
+  v.distributor === distributor
+  v.publicKey === samplePublicKey
+  active <- queryContractId distributor keyCid
+  assertMsg "publication must survive a fetch" (isSome active)
+
+testFetchWithoutDisclosureFails : Script ()
+testFetchWithoutDisclosureFails = do
+  distributor <- allocateParty "Distributor"
+  consumer <- allocateParty "Consumer"
+  keyCid <- publishKey distributor
+  submitFailsMatchingNoDisclosure consumer
+    (exerciseCmd (toInterfaceContractId @DistributorKey keyCid)
+       DistributorKey_Fetch with actor = consumer)
+    isContractNotFound "the consumer cannot see an undisclosed key publication"
+
+-- The fetch self-authorizes the named actor and only that actor, so a submitter
+-- cannot read on behalf of a party it cannot act as.
+testFetchAsAnotherActorFails : Script ()
+testFetchAsAnotherActorFails = do
+  distributor <- allocateParty "Distributor"
+  consumer <- allocateParty "Consumer"
+  other <- allocateParty "Other"
+  keyCid <- publishKey distributor
+  Some disc <- queryDisclosure distributor keyCid
+  submitFailsMatching consumer disc
+    (exerciseCmd (toInterfaceContractId @DistributorKey keyCid)
+       DistributorKey_Fetch with actor = other)
+    isAuthorizationFailure "the consumer cannot fetch as another actor"
+
+-- Rotation replaces the contract. The old publication is archived, so a consumer
+-- holding its id fails fast instead of reading a retired key, and the
+-- replacement holds the new key with the scheme fields unchanged.
+testRotateKeyReplacesThePublication : Script ()
+testRotateKeyReplacesThePublication = do
+  distributor <- allocateParty "Distributor"
+  keyCid <- publishKey distributor
+  newCid <- submit distributor $ exerciseCmd keyCid RotateKey with
+    newPublicKey = rotatedPublicKey
+  old <- queryContractId distributor keyCid
+  assertMsg "the rotated publication must be archived" (isNone old)
+  Some v <- queryInterfaceContractId distributor
+    (toInterfaceContractId @DistributorKey newCid)
+  v.publicKey === rotatedPublicKey
+  v.distributor === distributor
+  v.payloadCodec === "v2-quote-hash"
+
+-- A retired key is unreadable even by a consumer that had it disclosed, which is
+-- what makes rotation an effective revocation.
+testFetchOnRotatedPublicationFails : Script ()
+testFetchOnRotatedPublicationFails = do
+  distributor <- allocateParty "Distributor"
+  consumer <- allocateParty "Consumer"
+  keyCid <- publishKey distributor
+  Some disc <- queryDisclosure distributor keyCid
+  _ <- submit distributor $ exerciseCmd keyCid RotateKey with
+    newPublicKey = rotatedPublicKey
+  submitFailsMatching consumer disc
+    (exerciseCmd (toInterfaceContractId @DistributorKey keyCid)
+       DistributorKey_Fetch with actor = consumer)
+    isContractNotFound "a rotated-away key publication no longer reads"
+
+-- Only the distributor rotates its own key.
+testConsumerCannotRotateKey : Script ()
+testConsumerCannotRotateKey = do
+  distributor <- allocateParty "Distributor"
+  consumer <- allocateParty "Consumer"
+  keyCid <- publishKey distributor
+  Some disc <- queryDisclosure distributor keyCid
+  submitFailsMatching consumer disc
+    (exerciseCmd keyCid RotateKey with newPublicKey = rotatedPublicKey)
+    isAuthorizationFailure "a consumer cannot rotate the distributor's key"

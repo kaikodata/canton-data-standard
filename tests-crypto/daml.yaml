@@ -1,22 +1,18 @@
 sdk-version: 3.4.11
 name: canton-data-standard-tests-crypto
 source: daml
-version: 0.1.0
+version: 0.2.0
 dependencies:
   - daml-prim
   - daml-stdlib
   - daml-script
 data-dependencies:
-  - ../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.1.2.dar
-  - ../interfaces/canton-data-standard-quote-verifier-v1/.daml/dist/canton-data-standard-quote-verifier-v1-0.1.2.dar
-  - ../interfaces/canton-data-standard-quote-verifier-audit-v1/.daml/dist/canton-data-standard-quote-verifier-audit-v1-0.1.2.dar
-  - ../interfaces/canton-data-standard-datapoint-verifier-v1/.daml/dist/canton-data-standard-datapoint-verifier-v1-0.1.2.dar
-  - ../interfaces/canton-data-standard-datapoint-verifier-audit-v1/.daml/dist/canton-data-standard-datapoint-verifier-audit-v1-0.1.2.dar
-  - ../examples/verifier-producer/.daml/dist/verifier-producer-example-0.1.0.dar
-  - ../examples/verifier-consumer/.daml/dist/verifier-consumer-example-0.1.0.dar
-  - ../examples/datapoint-verifier-producer/.daml/dist/datapoint-verifier-producer-example-0.1.0.dar
-  - ../examples/datapoint-verifier-consumer/.daml/dist/datapoint-verifier-consumer-example-0.1.0.dar
-  - ../tests/.daml/dist/canton-data-standard-tests-0.1.0.dar
+  - ../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.2.0.dar
+  - ../interfaces/canton-data-standard-distributor-key-v1/.daml/dist/canton-data-standard-distributor-key-v1-0.2.0.dar
+  - ../interfaces/canton-data-standard-codecs/.daml/dist/canton-data-standard-codecs-0.2.0.dar
+  - ../examples/distributor-key-producer/.daml/dist/distributor-key-producer-example-0.2.0.dar
+  - ../examples/distributor-key-consumer/.daml/dist/distributor-key-consumer-example-0.2.0.dar
+  - ../tests/.daml/dist/canton-data-standard-tests-0.2.0.dar
 build-options:
   - --ghc-option=-Wunused-binds
   - --ghc-option=-Wunused-matches

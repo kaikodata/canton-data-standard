@@ -1,0 +1,89 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The codec between the typed `Quote` and the generic `Values` payload, in both
+-- directions.
+--
+-- A quote is a data point with a known schema, so a consumer that reads generic
+-- data points can read quotes too, and a distributor that publishes quotes can
+-- expose them on the generic interface without a second payload shape. Verifying
+-- a quote needs neither direction: the quote envelope hashes a `Quote` as a typed
+-- record and never passes through `Values`. This codec exists for consumers and
+-- distributors that want the generic form, and is no part of the signing path.
+--
+-- `valuesToQuote` is strict on purpose: exactly the three fields, each at exactly
+-- its expected type, and nothing else. A payload with an extra field is rejected
+-- and not ignored, because silently dropping a field would let two different
+-- payloads decode to the same quote.
+module DataStandard.Codecs.QuoteValues
+  ( quoteToValues
+  , valuesToQuote
+  , feedIdField
+  , priceField
+  , priceTimeField
+  ) where
+
+import qualified DA.TextMap as TM
+
+import DataStandard.Utils (AnyValue(..), Quote(..), Values)
+
+-- | The `Values` field name carrying a quote's `feedId`.
+feedIdField : Text
+feedIdField = "feedId"
+
+-- | The `Values` field name carrying a quote's `price`.
+priceField : Text
+priceField = "price"
+
+-- | The `Values` field name carrying a quote's `priceTime`.
+priceTimeField : Text
+priceTimeField = "priceTime"
+
+-- | Render a quote as a generic payload: `feedId` as text, `price` as a decimal,
+-- and `priceTime` as a time. Total, and the inverse of `valuesToQuote` on every
+-- quote.
+quoteToValues : Quote -> Values
+quoteToValues q = TM.fromList
+  [ (feedIdField, AVText q.feedId)
+  , (priceField, AVDecimal q.price)
+  , (priceTimeField, AVTime q.priceTime)
+  ]
+
+-- | Read a quote back out of a generic payload, or explain why the payload is not
+-- one. The payload must hold exactly the three quote fields, each under its
+-- expected tag; a missing field, a field of the wrong type, and an unrecognised
+-- field are each rejected, and the message names the field at fault.
+valuesToQuote : Values -> Either Text Quote
+valuesToQuote values = do
+  feedId <- requireText feedIdField
+  price <- requireDecimal priceField
+  priceTime <- requireTime priceTimeField
+  case [ k | (k, _) <- TM.toList values, k /= feedIdField, k /= priceField, k /= priceTimeField ] of
+    (extra :: _) -> Left ("unexpected field: " <> extra)
+    [] -> Right (Quote with feedId, price, priceTime)
+  where
+    require : Text -> Either Text AnyValue
+    require key = case TM.lookup key values of
+      None -> Left ("missing field: " <> key)
+      Some v -> Right v
+
+    wrongType : Text -> Either Text a
+    wrongType key = Left ("wrong type for field: " <> key)
+
+    requireText key = do
+      v <- require key
+      case v of
+        AVText t -> Right t
+        _ -> wrongType key
+
+    requireDecimal key = do
+      v <- require key
+      case v of
+        AVDecimal d -> Right d
+        _ -> wrongType key
+
+    requireTime key = do
+      v <- require key
+      case v of
+        AVTime t -> Right t
+        _ -> wrongType key

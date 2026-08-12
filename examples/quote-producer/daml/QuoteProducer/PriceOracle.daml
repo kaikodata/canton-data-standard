@@ -1,10 +1,10 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | A reference producer for the Data Standard's `PublishedQuote` interface. It
--- shows the whole of a provider's obligation: implement `PublishedQuote` on a
--- template the provider signs. A consumer of the standard reads the result
--- without depending on this package.
+-- | A reference producer for the Data Standard's `PublishedQuote` interface.
+-- All a distributor has to do is what this module does: implement
+-- `PublishedQuote` on a template the distributor signs. A consumer of the
+-- standard reads the result without depending on this package.
 module QuoteProducer.PriceOracle where
 
 import qualified DA.TextMap as TM
@@ -14,14 +14,13 @@ import DataStandard.Utils
 
 -- | A published price quote for a single feed.
 --
--- The template deliberately has no observers: a reader that is not a
--- stakeholder obtains the contract through explicit disclosure and reads it by
--- exercising `PublishedQuote_Fetch`, which keeps the cost of publishing
--- independent of the size of the audience.
+-- No observers, on purpose: a reader that is not a stakeholder gets the
+-- contract by explicit disclosure and reads it through `PublishedQuote_Fetch`.
+-- Publishing therefore costs the same however large the audience is.
 template PriceQuote
   with
     oracle      : Party
-      -- ^ The provider; signs and owns the publication.
+      -- ^ The distributor; signs and owns the publication.
     feedId      : Text
       -- ^ The feed this quote is for, for example "BTC/USD".
     price       : Decimal
@@ -44,9 +43,9 @@ template PriceQuote
           values = TM.fromList [("exampleoracle.com/source", "reference-implementation")]
 
     -- | Publish a fresh quote by archiving this contract and creating its
-    -- replacement. Because the old publication is archived, a consumer holding
-    -- its contract id fails fast rather than reading a stale quote; revoking a
-    -- feed is the same operation with no replacement created.
+    -- replacement. A consumer still holding the archived contract's id fails
+    -- fast, which is preferable to it reading a stale quote. Revocation is the
+    -- same operation with no replacement created.
     choice UpdateQuote : ContractId PriceQuote
       with
         newPrice       : Decimal

@@ -1,0 +1,119 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The structural properties the signed hash relies on, as opposed to the pinned
+-- values in `Test.GoldenVectorsTest`.
+--
+-- Three properties are load-bearing and each has a section here: the constructor
+-- tags make the `AnyValue` hash injective across types, map entries hash in
+-- code-point key order and never in insertion order, and the upgraded-record
+-- combinators tolerate optional fields appended by a later version. A regression in
+-- any of them is a signature-compatibility break, so each is asserted as a
+-- property here instead of being left implied by the vectors.
+module Test.StructuralHashPropsTest where
+
+import DA.Assert ((===))
+import DA.TextMap (TextMap)
+import qualified DA.TextMap as TM
+import Daml.Script
+
+import DataStandard.Codecs.StructuralHash
+  ( Hash, Hashable(hash), epoch, hashRecord, hashText, hashUpgradedRecord
+  , hashUpgradedVariant, hashVariant )
+import DataStandard.Utils (AnyValue(..))
+
+expectNe : Text -> Hash -> Hash -> Script ()
+expectNe label a b = assertMsg label (a /= b)
+
+-- | The hazard the tags exist to fix. Hashed bare, a value's type leaves no trace
+-- in its hash, so five pairs of differently-typed values are indistinguishable.
+-- These assertions are equalities on purpose. They document the collision the
+-- tagged instance must separate, and they would start failing if the scalar
+-- renderings ever changed underneath.
+testUntaggedScalarsCollide : Script ()
+testUntaggedScalarsCollide = do
+  hash (1 : Int) === hash ("1" : Text)
+  hash True === hash ("true" : Text)
+  hash epoch === hash (0 : Int)
+  hash (1.5 : Decimal) === hash ("1.5" : Text)
+  hash ([] : [Int]) === hash (TM.empty : TextMap Int)
+
+-- | The fix: routing every `AnyValue` node through `hashVariant` with its
+-- constructor tag separates all five colliding pairs. Without this, a distributor's
+-- signature over the integer 1 would also be a valid signature over the text "1".
+testTaggedAnyValuesAreDistinct : Script ()
+testTaggedAnyValuesAreDistinct = do
+  expectNe "int vs text" (hash (AVInt 1)) (hash (AVText "1"))
+  expectNe "bool vs text" (hash (AVBool True)) (hash (AVText "true"))
+  expectNe "time vs int" (hash (AVTime epoch)) (hash (AVInt 0))
+  expectNe "decimal vs text" (hash (AVDecimal 1.5)) (hash (AVText "1.5"))
+  expectNe "list vs map" (hash (AVList [])) (hash (AVMap TM.empty))
+
+-- | The two tagged probes pinned in the vector contract, kept beside the
+-- separation property so the fix is anchored to values and not only to an
+-- inequality that any two distinct hashes would satisfy.
+testTaggedProbeVectors : Script ()
+testTaggedProbeVectors = do
+  (hash (AVInt 1)).value === "5b3f2c5b15bb2d1b2a9e832d6ece111f9dfc8305b9ebc121bb07177ab9dd38c2"
+  (hash (AVText "1")).value === "8a0580b318bfca4823ad25340b530efe218e21962cdbbe43102691715168edd9"
+
+-- | Map entries hash in ascending code-point key order, which coincides with raw
+-- UTF-8 byte order. The astral triple pins the case a UTF-16 code-unit sort gets
+-- wrong, and the prefix pair pins that a shorter key sorts before the longer key
+-- it prefixes.
+testKeyOrderIsCodePointOrder : Script ()
+testKeyOrderIsCodePointOrder = do
+  let astral = TM.fromList [("z", AVInt 1), ("\x1F600", AVInt 2), ("\xE000", AVInt 3)]
+  map fst (TM.toList astral) === ["z", "\xE000", "\x1F600"]
+  let prefix = TM.fromList [("ab", AVInt 2), ("a", AVInt 1)]
+  map fst (TM.toList prefix) === ["a", "ab"]
+
+-- | Insertion order never reaches the hash: the same entries assembled in either
+-- order hash alike. The pinned astral and prefix vectors lock down which order is
+-- used; together with this, that establishes the hash as a function of the map's
+-- contents alone.
+testInsertionOrderIsIrrelevant : Script ()
+testInsertionOrderIsIrrelevant = do
+  let forwards = TM.fromList [("a", AVInt 1), ("b", AVInt 2), ("\x1F600", AVInt 3)]
+      backwards = TM.fromList [("\x1F600", AVInt 3), ("b", AVInt 2), ("a", AVInt 1)]
+  hash (AVMap forwards) === hash (AVMap backwards)
+
+-- | A record whose later version appends optional fields keeps its hash while
+-- those fields are unpopulated, however many of them there are. This is what lets
+-- a signed envelope gain fields compatibly, and it is a property a
+-- length-prefixed encoding structurally cannot offer.
+testUpgradedRecordTolerance : Script ()
+testUpgradedRecordTolerance = do
+  let f1 = hashText "field1"
+      f2 = hashText "field2"
+      f3 = hashText "field3"
+  hashRecord [f1, f2] === hashUpgradedRecord [f1, f2] []
+  hashRecord [f1, f2] === hashUpgradedRecord [f1, f2] [None]
+  hashRecord [f1, f2] === hashUpgradedRecord [f1, f2] [None, None]
+  -- The first populated field changes the hash, and trailing Nones after it are
+  -- still dropped.
+  expectNe "a Some changes the hash"
+    (hashRecord [f1, f2]) (hashUpgradedRecord [f1, f2] [Some f3])
+  hashUpgradedRecord [f1, f2] [Some f3] === hashUpgradedRecord [f1, f2] [Some f3, None]
+  -- A None that precedes a Some is a field position, not padding, so it is
+  -- significant: a payload cannot silently shift its appended fields left.
+  expectNe "an inner None is significant"
+    (hashUpgradedRecord [f1, f2] [Some f3])
+    (hashUpgradedRecord [f1, f2] [None, Some f3])
+
+-- | The same tolerance for variants, with the tag included in the hash.
+testUpgradedVariantTolerance : Script ()
+testUpgradedVariantTolerance = do
+  let f1 = hashText "field1"
+      f2 = hashText "field2"
+  hashVariant "tag" [f1] === hashUpgradedVariant "tag" [f1] []
+  hashVariant "tag" [f1] === hashUpgradedVariant "tag" [f1] [None]
+  hashVariant "tag" [f1] === hashUpgradedVariant "tag" [f1] [None, None]
+  expectNe "a Some changes the variant hash"
+    (hashVariant "tag" [f1]) (hashUpgradedVariant "tag" [f1] [Some f2])
+  hashUpgradedVariant "tag" [f1] [Some f2] === hashUpgradedVariant "tag" [f1] [Some f2, None]
+  expectNe "an inner None is significant in a variant"
+    (hashUpgradedVariant "tag" [f1] [Some f2])
+    (hashUpgradedVariant "tag" [f1] [None, Some f2])
+  expectNe "the tag is part of the hash"
+    (hashVariant "tagA" [f1]) (hashVariant "tagB" [f1])

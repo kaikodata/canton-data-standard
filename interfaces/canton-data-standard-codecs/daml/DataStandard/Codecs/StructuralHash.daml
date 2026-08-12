@@ -1,0 +1,197 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The structural hash the Data Standard signs over: a recursive SHA-256 of a
+-- value's shape, in place of a canonical byte encoding of it.
+--
+-- The combinators are the `Splice.Amulet.CryptoHash` scheme, ported unchanged so
+-- that a signer written against Digital Asset's description of it produces the
+-- same hashes. On top of them this module adds what the Data Standard needs and
+-- the upstream scheme does not define: a type-tagged `AnyValue` instance
+-- (upstream's untagged scalars collide across constructors, so `AVInt 1` and
+-- `AVText "1"` would hash alike), plus `Bool`, `Time` and `TextMap` instances.
+--
+-- The scheme in full: `hash(text)` is the lowercase-hex SHA-256 of the text's
+-- UTF-8 bytes; a list hashes as `sha256("N|h1|...|hN")`; a variant hashes as
+-- `sha256("tag|N|h1|...|hN")`; a record hashes as the list of its field hashes.
+-- Only SHA-256, hex, and string joins are involved, which is what makes the
+-- scheme practical to implement outside Daml. Two properties are worth knowing
+-- before designing a payload around it. `hashUpgradedRecord` lets a later version
+-- append optional fields to an envelope without changing existing hashes. And
+-- there is no delimiter to guard, because field boundaries come from the nesting
+-- and not from a separator inside the data.
+--
+-- `sha256` here is the one from `DA.Text`, the stable standard library, and not
+-- the one from the alpha `DA.Crypto.Text`. Hashing a payload needs no
+-- alpha-crypto flag; only `DataStandard.Codecs.Verify`, the signature check,
+-- does.
+module DataStandard.Codecs.StructuralHash
+  ( Hash(..)
+  , hashText
+  , hashRecord
+  , hashUpgradedRecord
+  , hashVariant
+  , hashUpgradedVariant
+  , hashList
+  , hashTextMapWith
+  , Hashable(hash)
+  , epoch
+  , timeToMillis
+  ) where
+
+import DA.Date (Month(Jan), date)
+import DA.Optional (isNone)
+import qualified DA.Text as T
+import DA.TextMap (TextMap)
+import qualified DA.TextMap as TM
+import DA.Time (convertRelTimeToMicroseconds, subTime, time)
+
+import DataStandard.Utils (AnyValue(..))
+
+-- | A structural hash: the lowercase-hex SHA-256 at the root of a value's hash
+-- tree. Wrapped in its own type so a hash cannot be confused with the text it
+-- was computed over. The root hash of a signed payload is what a distributor
+-- signs and what a verified result reports as its `canonicalHash`.
+data Hash = Hash with value : Text
+  deriving (Eq, Show)
+
+-- Combinators ported verbatim from Splice.Amulet.CryptoHash
+------------------------------------------------------------
+
+-- | Hash a text leaf: the SHA-256 of its UTF-8 bytes, hex-encoded. Text is
+-- hashed exactly as given, with no Unicode normalisation.
+hashText : Text -> Hash
+hashText = Hash . T.sha256
+
+hashListInternal : [Text] -> Hash
+hashListInternal ts = Hash $ T.sha256 $ T.intercalate "|" (show (length ts) :: ts)
+
+hashVariantInternal : Text -> [Text] -> Hash
+hashVariantInternal tag fieldValues =
+  Hash $ T.sha256 $ T.intercalate "|" (tag :: show (length fieldValues) :: fieldValues)
+
+hashOptionalInternal : Optional Hash -> Hash
+hashOptionalInternal None = hashListInternal []
+hashOptionalInternal (Some h) = hashListInternal [h.value]
+
+dropTrailingNones : [Optional Hash] -> [Optional Hash]
+dropTrailingNones = reverse . dropWhile isNone . reverse
+
+-- | Hash a record as the list of its field hashes, in declaration order. The
+-- arity is part of the hash, so a record can never collide with a different
+-- record that shares a prefix of fields.
+hashRecord : [Hash] -> Hash
+hashRecord = hashListInternal . map (.value)
+
+-- | Hash a record whose later version appended optional fields. Trailing `None`s
+-- are dropped before hashing, so a payload that gains optional fields it does not
+-- populate keeps the hash it had before the fields existed. That is the property
+-- that lets a signed envelope evolve compatibly. A `None` that precedes a `Some`
+-- is significant and hashes as the empty option.
+hashUpgradedRecord : [Hash] -> [Optional Hash] -> Hash
+hashUpgradedRecord oldFieldHashes newFieldHashes =
+  hashListInternal $
+    [ h.value | h <- oldFieldHashes ] ++
+    [ (hashOptionalInternal optField).value | optField <- dropTrailingNones newFieldHashes ]
+
+-- | Hash a variant as its tag plus the list of its field hashes. The tag is part
+-- of the hash, so two constructors carrying the same fields hash differently.
+hashVariant : Text -> [Hash] -> Hash
+hashVariant tag fieldHashes = hashVariantInternal tag [ h.value | h <- fieldHashes ]
+
+-- | Hash a variant whose later version appended optional fields, with the same
+-- trailing-`None` tolerance as `hashUpgradedRecord`.
+hashUpgradedVariant : Text -> [Hash] -> [Optional Hash] -> Hash
+hashUpgradedVariant tag oldFieldHashes newFieldHashes =
+  hashVariantInternal tag $
+    [ h.value | h <- oldFieldHashes ] ++
+    [ (hashOptionalInternal optField).value | optField <- dropTrailingNones newFieldHashes ]
+
+-- | Hash a list under a caller-supplied element hasher. The element count is part
+-- of the hash, so concatenation cannot be forged by re-splitting elements.
+hashList : (a -> Hash) -> [a] -> Hash
+hashList hashElem xs = hashListInternal [ (hashElem x).value | x <- xs ]
+
+-- | The types the structural hash defines a leaf or node shape for. A distributor
+-- and a consumer agree on a payload's hash by agreeing on these instances, so an
+-- instance is part of the standard's signed surface and is added only as a
+-- versioned change.
+class Hashable a where
+  hash : a -> Hash
+
+instance Hashable Hash where
+  hash h = h
+
+instance Hashable Int where
+  hash = hashText . show
+
+instance Hashable Decimal where
+  hash = hashText . show
+
+instance Hashable Party where
+  hash = hashText . partyToText
+
+instance Hashable Text where
+  hash = hashText
+
+instance Hashable a => Hashable (Optional a) where
+  hash = hashOptionalInternal . fmap hash
+
+instance Hashable a => Hashable [a] where
+  hash = hashList hash
+
+-- Data Standard extensions
+------------------------------------------------------------
+
+-- Rendered "true"/"false", the JSON convention every language has a constant
+-- for. Daml's show would give "True"/"False", which is a Daml-ism.
+instance Hashable Bool where
+  hash b = hashText (if b then "true" else "false")
+
+-- | The Unix epoch: the origin that times are rendered relative to.
+epoch : Time
+epoch = time (date 1970 Jan 1) 0 0 0
+
+-- | A time as integer milliseconds since the Unix epoch, the rendering the hash
+-- commits to. Sub-millisecond precision is truncated, so a payload must not carry
+-- a timestamp finer than a millisecond: two times that differ only below the
+-- millisecond hash alike.
+timeToMillis : Time -> Int
+timeToMillis t = convertRelTimeToMicroseconds (subTime t epoch) / 1000
+
+instance Hashable Time where
+  hash = hashText . show . timeToMillis
+
+-- | Hash a `TextMap` under a caller-supplied value hasher: entries in ascending
+-- code-point key order (`DA.TextMap.toList`'s order, which coincides with raw
+-- UTF-8 byte order), each entry a 2-field record of the key hash and the value
+-- hash, so the map hash is a list of pair records. Insertion order never reaches
+-- the hash. Implementers outside Daml must sort by code point (equivalently, by
+-- UTF-8 bytes). A UTF-16 code-unit sort orders astral-plane keys differently and
+-- will produce a different hash.
+hashTextMapWith : (a -> Hash) -> TextMap a -> Hash
+hashTextMapWith hashVal m =
+  hashList (\(k, v) -> hashRecord [hashText k, hashVal v]) (TM.toList m)
+
+instance Hashable a => Hashable (TextMap a) where
+  hash = hashTextMapWith hash
+
+-- The tagged AnyValue instance: every node routes through hashVariant with a
+-- neutral, non-numeric tag. The tags are decoupled from the Daml constructor
+-- spelling on purpose, so that replacing this AnyValue with a structurally equal
+-- one under different constructor names (AVText vs AV_Text) cannot change any
+-- signature. They are non-numeric so a tag can never be read as a list length,
+-- and "|"-free so a tag cannot shift a field boundary.
+--
+-- Without the tags the scheme is not injective across constructors: the untagged
+-- forms of AVInt 1 and AVText "1", of AVBool True and AVText "true", of
+-- AVTime epoch and AVInt 0, of AVDecimal 1.5 and AVText "1.5", and of an empty
+-- list and an empty map are all pairwise equal.
+instance Hashable AnyValue where
+  hash (AVBool b)    = hashVariant "bool"    [hash b]
+  hash (AVInt n)     = hashVariant "int"     [hash n]
+  hash (AVDecimal d) = hashVariant "decimal" [hash d]
+  hash (AVTime t)    = hashVariant "time"    [hash t]
+  hash (AVText s)    = hashVariant "text"    [hash s]
+  hash (AVList xs)   = hashVariant "list"    [hash xs]
+  hash (AVMap m)     = hashVariant "map"     [hash m]

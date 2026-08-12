@@ -95,8 +95,8 @@ testFetchWithoutDisclosureFails = do
        PublishedQuote_Fetch with actor = reader)
     isContractNotFound "the reader cannot see an undisclosed publication"
 
--- The fetch self-authorizes only the named actor: a submitter cannot read on
--- behalf of a party it cannot act as.
+-- The fetch self-authorizes the named actor and only that actor, so a submitter
+-- cannot read on behalf of a party it cannot act as.
 testFetchAsAnotherActorFails : Script ()
 testFetchAsAnotherActorFails = do
   oracle <- allocateParty "Oracle"

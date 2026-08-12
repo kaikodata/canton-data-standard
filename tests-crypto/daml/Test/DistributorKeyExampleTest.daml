@@ -1,0 +1,295 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The example pair end to end: a distributor publishes a signing key, signs a
+-- quote off-ledger, and a consumer verifies and settles on it inside its own choice.
+--
+-- That is the pull flow in full. No verifier interface is involved: the only
+-- on-ledger surface the distributor exposes is the `DistributorKey` view, the
+-- verification is a library call in the consumer's own choice body, and the
+-- consumer's package needs no alpha-crypto flag to make it.
+--
+-- The failure paths cover both sides of the split. The library's own messages
+-- (`"invalid signature"`, `"payload expired"`, `"unsupported payload codec"`)
+-- propagate out of the consumer's choice unchanged, while the consumer's own
+-- gates (`"untrusted distributor"`, `"feed mismatch"`, `"quote too stale"`) are
+-- checks the standard leaves to the consumer by design.
+module Test.DistributorKeyExampleTest where
+
+import DA.Assert ((===))
+import DA.Optional (isNone)
+import DA.Time (RelTime, addRelTime, hours, minutes)
+import Daml.Script
+
+import DataStandard.Codecs.Envelope
+  ( dataPointHashCodecId, hashSignedQuote, quoteHashCodecId )
+import DataStandard.DistributorKeyV1 (DistributorKey)
+import DataStandard.Utils (Quote(..), SignedQuote(..))
+import DistributorKeyConsumer.Trading
+import DistributorKeyProducer.Publication
+
+import Test.Fixtures (isContractNotFound, submitFailsMatching, submitFailsWith)
+
+-- | Everything a test in this module needs: a distributor with a real keypair and
+-- a published key, the two trading parties, and the disclosure a non-stakeholder
+-- consumer needs.
+data ExampleFixture = ExampleFixture with
+    distributor : Party
+    seller : Party
+    buyer : Party
+    keyPair : Secp256k1KeyPair
+    keyTpl : ContractId DistributorKeyPublication
+    keyIf : ContractId DistributorKey
+    disc : Disclosure
+
+setupExample : Script ExampleFixture
+setupExample = setupExampleWith quoteHashCodecId
+
+-- | As `setupExample`, publishing the key under a caller-chosen codec id so a test
+-- can pin the codec-mismatch path.
+setupExampleWith : Text -> Script ExampleFixture
+setupExampleWith payloadCodec = do
+  distributor <- allocateParty "Distributor"
+  seller <- allocateParty "Seller"
+  buyer <- allocateParty "Buyer"
+  keyPair <- secp256k1generatekeypair
+  keyTpl <- submit distributor $ createCmd DistributorKeyPublication with
+    distributor
+    publicKey = keyPair.publicKey
+    payloadCodec
+  Some disc <- queryDisclosure distributor keyTpl
+  pure ExampleFixture with
+    distributor, seller, buyer, keyPair, keyTpl, disc
+    keyIf = toInterfaceContractId @DistributorKey keyTpl
+
+-- | A valid quote payload: BTC/USD @ 65000, published now, expiring in an hour.
+livePayload : Time -> SignedQuote
+livePayload now = SignedQuote with
+  publishedAt = now
+  expiresAt = addRelTime now (hours 1)
+  quote = Quote with
+    feedId = "BTC/USD"
+    price = 65000.0
+    priceTime = addRelTime now (minutes (-1))
+
+signQuote : Text -> SignedQuote -> Script Text
+signQuote privateKey payload =
+  secp256k1sign privateKey (hashSignedQuote payload).value
+
+-- | An offer from the fixture's seller to its buyer, pinning the fixture's
+-- distributor and key.
+createOffer : ExampleFixture -> Script (ContractId SignedQuoteTradeOffer)
+createOffer f = createOfferFor f "BTC/USD" f.distributor (hours 1)
+
+createOfferFor : ExampleFixture -> Text -> Party -> RelTime -> Script (ContractId SignedQuoteTradeOffer)
+createOfferFor f feedId expectedDistributor maxQuoteAge =
+  submit f.seller $ createCmd SignedQuoteTradeOffer with
+    seller = f.seller
+    buyer = f.buyer
+    feedId
+    quantity = 0.5
+    expectedDistributor
+    maxQuoteAge
+    keyCid = f.keyIf
+
+-- The whole flow: sign off-ledger, verify through the library inside the consumer's
+-- own choice, settle at the verified price, and keep the evidence beside the trade.
+testSignedQuoteTradeSettles : Script ()
+testSignedQuoteTradeSettles = do
+  f <- setupExample
+  now <- getTime
+  let payload = livePayload now
+  sig <- signQuote f.keyPair.privateKey payload
+  offerCid <- createOffer f
+  settlementCid <- submit (actAs f.buyer <> disclose f.disc) $
+    exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig
+  Some s <- queryContractId f.buyer settlementCid
+  s.seller === f.seller
+  s.buyer === f.buyer
+  s.feedId === "BTC/USD"
+  s.quantity === 0.5
+  s.price === 65000.0
+  s.totalAmount === 32500.0
+  s.distributor === f.distributor
+  s.priceTime === payload.quote.priceTime
+  s.publishedAt === payload.publishedAt
+  s.verifiedAt === now
+  s.expiresAt === payload.expiresAt
+  -- The evidence triple: enough to re-verify the price off-ledger later, with no
+  -- dependency on the key contract still being active.
+  s.canonicalHash === (hashSignedQuote payload).value
+  s.signature === sig
+  s.publicKey === f.keyPair.publicKey
+
+-- A verification leaves the key publication untouched, because it reads through a
+-- nonconsuming choice. One contract therefore serves unlimited settlements with
+-- no contention between the consumers using it.
+testKeyPublicationSurvivesSettlement : Script ()
+testKeyPublicationSurvivesSettlement = do
+  f <- setupExample
+  now <- getTime
+  let payload = livePayload now
+  sig <- signQuote f.keyPair.privateKey payload
+  offer1 <- createOffer f
+  offer2 <- createOffer f
+  _ <- submit (actAs f.buyer <> disclose f.disc) $
+    exerciseCmd offer1 AcceptSignedQuoteTrade with payload, signature = sig
+  _ <- submit (actAs f.buyer <> disclose f.disc) $
+    exerciseCmd offer2 AcceptSignedQuoteTrade with payload, signature = sig
+  Some pub <- queryContractId f.distributor f.keyTpl
+  pub.publicKey === f.keyPair.publicKey
+
+-- Rotation is revocation: after the distributor rotates, a payload signed under the
+-- retired key can no longer be verified through the archived publication, and a
+-- payload signed under the new key settles through its replacement.
+testRotationRetiresTheOldKey : Script ()
+testRotationRetiresTheOldKey = do
+  f <- setupExample
+  now <- getTime
+  let payload = livePayload now
+  oldSig <- signQuote f.keyPair.privateKey payload
+  newKeyPair <- secp256k1generatekeypair
+  newKeyTpl <- submit f.distributor $ exerciseCmd f.keyTpl RotateKey with
+    newPublicKey = newKeyPair.publicKey
+  retired <- queryContractId f.distributor f.keyTpl
+  assertMsg "the retired publication must be archived" (isNone retired)
+
+  -- The old disclosure no longer resolves, so the old signature has nowhere to
+  -- verify: the contract id is gone for every party. Asserted on the structured
+  -- error instead of on its text, because this failure comes from the platform,
+  -- and in-memory Daml Script and live Canton word it differently.
+  staleOffer <- createOffer f
+  submitFailsMatching f.buyer f.disc
+    (exerciseCmd staleOffer AcceptSignedQuoteTrade with payload, signature = oldSig)
+    isContractNotFound "a retired key publication no longer reads"
+
+  -- The replacement carries the new key, and a quote signed under it settles.
+  Some newDisc <- queryDisclosure f.distributor newKeyTpl
+  newSig <- signQuote newKeyPair.privateKey payload
+  newOffer <- submit f.seller $ createCmd SignedQuoteTradeOffer with
+    seller = f.seller
+    buyer = f.buyer
+    feedId = "BTC/USD"
+    quantity = 0.5
+    expectedDistributor = f.distributor
+    maxQuoteAge = hours 1
+    keyCid = toInterfaceContractId @DistributorKey newKeyTpl
+  settlementCid <- submit (actAs f.buyer <> disclose newDisc) $
+    exerciseCmd newOffer AcceptSignedQuoteTrade with payload, signature = newSig
+  Some s <- queryContractId f.buyer settlementCid
+  s.publicKey === newKeyPair.publicKey
+
+-- A consumer gate, not a standard one: the key is authentic, but it is not the
+-- distributor this buyer agreed to settle on.
+testUntrustedDistributorRejected : Script ()
+testUntrustedDistributorRejected = do
+  f <- setupExample
+  other <- allocateParty "OtherDistributor"
+  now <- getTime
+  let payload = livePayload now
+  sig <- signQuote f.keyPair.privateKey payload
+  offerCid <- createOfferFor f "BTC/USD" other (hours 1)
+  submitFailsWith f.buyer f.disc
+    (exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig)
+    "untrusted distributor"
+
+-- A consumer gate: one key signs every feed the distributor publishes, so the
+-- consumer must check the feed itself.
+testFeedMismatchRejected : Script ()
+testFeedMismatchRejected = do
+  f <- setupExample
+  now <- getTime
+  let payload = livePayload now
+  sig <- signQuote f.keyPair.privateKey payload
+  offerCid <- createOfferFor f "ETH/USD" f.distributor (hours 1)
+  submitFailsWith f.buyer f.disc
+    (exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig)
+    "feed mismatch"
+
+-- A consumer gate on top of the signed expiry: the payload is still live by its own
+-- window, but older than this buyer's staleness policy.
+testStaleQuoteRejected : Script ()
+testStaleQuoteRejected = do
+  f <- setupExample
+  now <- getTime
+  let producedAt = addRelTime now (hours (-2))
+      payload = SignedQuote with
+        publishedAt = producedAt
+        expiresAt = addRelTime now (hours 1)
+        quote = Quote with
+          feedId = "BTC/USD"
+          price = 65000.0
+          priceTime = producedAt
+  sig <- signQuote f.keyPair.privateKey payload
+  offerCid <- createOfferFor f "BTC/USD" f.distributor (hours 1)
+  submitFailsWith f.buyer f.disc
+    (exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig)
+    "quote too stale"
+
+-- The library's message, propagated out of the consumer's choice: a tampered price
+-- leaves the signature valid DER but bound to a different payload.
+testTamperedPriceRejectedWithLibraryMessage : Script ()
+testTamperedPriceRejectedWithLibraryMessage = do
+  f <- setupExample
+  now <- getTime
+  let payload = livePayload now
+  sig <- signQuote f.keyPair.privateKey payload
+  let tampered = payload with quote = payload.quote with price = 1.0
+  offerCid <- createOffer f
+  submitFailsWith f.buyer f.disc
+    (exerciseCmd offerCid AcceptSignedQuoteTrade with payload = tampered, signature = sig)
+    "invalid signature"
+
+-- The library's message again: a signature by a key the distributor never published.
+testForeignSignatureRejected : Script ()
+testForeignSignatureRejected = do
+  f <- setupExample
+  attacker <- secp256k1generatekeypair
+  now <- getTime
+  let payload = livePayload now
+  forgedSig <- signQuote attacker.privateKey payload
+  offerCid <- createOffer f
+  submitFailsWith f.buyer f.disc
+    (exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = forgedSig)
+    "invalid signature"
+
+-- The signed expiry is the standard's own replay bound, and it aborts the consumer's
+-- transaction with the library's message.
+testExpiredPayloadRejected : Script ()
+testExpiredPayloadRejected = do
+  f <- setupExample
+  now <- getTime
+  let payload = SignedQuote with
+        publishedAt = addRelTime now (hours (-2))
+        expiresAt = addRelTime now (minutes (-30))
+        quote = Quote with
+          feedId = "BTC/USD"
+          price = 65000.0
+          priceTime = addRelTime now (hours (-2))
+  sig <- signQuote f.keyPair.privateKey payload
+  offerCid <- createOffer f
+  submitFailsWith f.buyer f.disc
+    (exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig)
+    "payload expired"
+
+-- A key published for the data point envelope does not verify quotes, even though
+-- the key itself is genuine and the signature is over a real quote hash.
+testCodecMismatchRejected : Script ()
+testCodecMismatchRejected = do
+  f <- setupExampleWith dataPointHashCodecId
+  now <- getTime
+  let payload = livePayload now
+  sig <- signQuote f.keyPair.privateKey payload
+  offerCid <- createOffer f
+  submitFailsWith f.buyer f.disc
+    (exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig)
+    "unsupported payload codec"
+
+-- The seller can withdraw an offer the buyer has not accepted.
+testSellerCancelsOffer : Script ()
+testSellerCancelsOffer = do
+  f <- setupExample
+  offerCid <- createOffer f
+  submit f.seller $ exerciseCmd offerCid CancelOffer
+  gone <- queryContractId f.seller offerCid
+  assertMsg "a cancelled offer must be archived" (isNone gone)

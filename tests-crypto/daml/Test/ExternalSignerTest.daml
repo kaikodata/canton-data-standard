@@ -1,0 +1,189 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The cross-language signer path: signatures produced entirely outside Daml
+-- verify through this library, unchanged.
+--
+-- This is the standard's central interoperability claim, and the only test module
+-- that can substantiate it. Every other crypto test signs with Daml Script's own
+-- helpers, which proves the library is self-consistent but says nothing about a
+-- third-party signer. Here both the structural hash and the ECDSA signature were
+-- computed by other implementations, from the written scheme:
+--
+--   * the data point fixture by a Python reference (pyca/cryptography) over the
+--     normative `gvEnvelope` payload;
+--   * the quote fixture by the Go signer in `pkg/cantonpulloracle` over the
+--     normative `gvQuoteTyped` payload, with RFC 6979 deterministic nonces.
+--
+-- That is two implementations in two languages, under two key pairs, agreeing on
+-- one hash scheme. Every constant below is a fixture from elsewhere, and none of
+-- them may be regenerated to make a test pass. A failure here means this
+-- library's hash or its signature check has diverged from the scheme the
+-- fixtures were made under.
+module Test.ExternalSignerTest where
+
+import DA.Assert ((===))
+import qualified DA.TextMap as TM
+import DA.Time (addRelTime, milliseconds)
+import Daml.Script
+
+import DataStandard.Codecs.Envelope (hashSignedDataPoint, hashSignedQuote)
+import DataStandard.Codecs.StructuralHash (epoch)
+import DataStandard.Codecs.Verify (verifyDataPointWith, verifyQuoteWith)
+import DataStandard.Utils (AnyValue(..), Quote(..), SignedDataPoint(..), SignedQuote(..))
+
+fromMillis : Int -> Time
+fromMillis ms = addRelTime epoch (milliseconds ms)
+
+t0 : Time
+t0 = fromMillis 1768480245000
+
+t1 : Time
+t1 = fromMillis 1768483845000
+
+-- Data point side: the Python fixture
+------------------------------------------------------------
+
+-- | The exact payload the Python reference hashed and signed: the normative
+-- `gvEnvelope` data point envelope.
+pythonPayload : SignedDataPoint
+pythonPayload = SignedDataPoint with
+  publishedAt = t0
+  expiresAt = t1
+  schemaVersion = "1.0.0"
+  values = TM.fromList [("feedId", AVText "EUR/USD"), ("rate", AVDecimal 1.0875)]
+
+-- | `gvEnvelope`: the root hash the Python implementation computed independently.
+pythonPayloadHash : Text
+pythonPayloadHash = "1ac5fa4ba0227c3e348464699c40b5f313ffbae4c12943e544d2e44d176b575c"
+
+-- | Produced by the Python reference signer (pyca/cryptography): a secp256k1 public
+-- key in hex DER-SPKI form. No Daml code ever held the matching private key.
+pythonPubKey : Text
+pythonPubKey = "3056301006072a8648ce3d020106052b8104000a034200041c05f66cb995dcfb3742bc22dcd7f48d2c8cdbb1314fc8a6eec55120708ac667651e2db08cc4924d42e99cdf9d1544c86b30b13a31e1c824dce2c7af9f58e12d"
+
+-- | Produced by the Python reference signer: ECDSA over sha256 of the root hash's
+-- bytes, DER-encoded and hex-encoded.
+pythonSig : Text
+pythonSig = "3046022100c3360531fcaefdadd486dc094fa870dbb35c1d34643124b8e33cd9bae8f6312f022100e64a75f6e13a1060b4a850b3395a1ad0e080015dcfd7f9e6212b444c1fa34e69"
+
+-- Quote side: the Go fixture
+------------------------------------------------------------
+
+-- | The exact payload the Go signer hashed and signed: the normative `gvQuoteTyped`
+-- quote envelope.
+goPayload : SignedQuote
+goPayload = SignedQuote with
+  publishedAt = t0
+  expiresAt = t1
+  quote = Quote with
+    feedId = "BTC/USD"
+    price = 65000.0
+    priceTime = t0
+
+-- | `gvQuoteTyped`: the root hash the Go implementation computed independently.
+goPayloadHash : Text
+goPayloadHash = "c6ef3856385d967474f7c84b2822b43c689ce5fd233e85c0d76680e3c907f138"
+
+-- | Produced by the Go signer in `pkg/cantonpulloracle`
+-- (`TestGoldenSignatureFixtures`, ONC-2259): its test key as hex DER-SPKI.
+goSignerPubKey : Text
+goSignerPubKey = "3056301006072a8648ce3d020106052b8104000a034200043432ed27a36d76b5badc2f5171413ba858dc7a53a78df3caeb439f1e81b11210b5f55e741b31fae62c9aeb1300e514c42a2f5fcd995994ba82b2547150417ae7"
+
+-- | Produced by the Go signer in `pkg/cantonpulloracle`
+-- (`TestGoldenSignatureFixtures`, ONC-2259): ECDSA over `goPayloadHash`, with
+-- libsecp256k1 RFC 6979 deterministic nonces, DER-encoded and hex-encoded.
+goQuoteSig : Text
+goQuoteSig = "30450221008ddc1b6bae76c381f18c88e9a0e0dc4fb2a8443199cfe828bc8571c8f1b162e902204558a29186afbe2d8c0b4867eff8896d3b3407abdeef2babd79637e077c53329"
+
+expectLeft : Text -> Either Text a -> Script ()
+expectLeft expected result = case result of
+  Left err -> err === expected
+  Right _ -> abort ("expected failure: " <> expected)
+
+expectRight : Either Text a -> Script a
+expectRight result = case result of
+  Left err -> abort ("expected success, got: " <> err)
+  Right v -> pure v
+
+-- The two implementations agree on the hash before any signature is considered.
+-- Asserted separately so a divergence is diagnosable: a failure here is a hash
+-- mismatch, a failure below is a signature mismatch.
+testExternalHashesAgree : Script ()
+testExternalHashesAgree = do
+  (hashSignedDataPoint pythonPayload).value === pythonPayloadHash
+  (hashSignedQuote goPayload).value === goPayloadHash
+
+-- A data point signature made entirely outside Daml verifies through the library,
+-- and the result reports the same root hash as its `canonicalHash`.
+testPythonDataPointSignatureVerifies : Script ()
+testPythonDataPointSignatureVerifies = do
+  distributor <- allocateParty "PythonDistributor"
+  v <- expectRight (verifyDataPointWith distributor pythonPubKey t0 pythonPayload pythonSig)
+  v.distributor === distributor
+  v.schemaVersion === "1.0.0"
+  TM.lookup "rate" v.values === Some (AVDecimal 1.0875)
+  v.canonicalHash === pythonPayloadHash
+  v.publicKey === pythonPubKey
+  v.signature === pythonSig
+
+-- The external signature stays bound to the payload it was made over: an edited
+-- rate, an edited schema, and an edited window are each refused.
+testPythonDataPointSignatureBoundToPayload : Script ()
+testPythonDataPointSignatureBoundToPayload = do
+  distributor <- allocateParty "PythonDistributor"
+  let check payload = expectLeft "invalid signature"
+        (verifyDataPointWith distributor pythonPubKey t0 payload pythonSig)
+  check (pythonPayload with values = TM.insert "rate" (AVDecimal 1.0876) pythonPayload.values)
+  check (pythonPayload with schemaVersion = "1.0.1")
+  check (pythonPayload with expiresAt = addRelTime t1 (milliseconds 1000))
+
+-- A quote signature produced by the Go signer verifies through the library. This
+-- is the fixture that pins the Daml verifier and the production Go signer to one
+-- shared vector, instead of to two vectors that happen to agree.
+testGoQuoteSignatureVerifies : Script ()
+testGoQuoteSignatureVerifies = do
+  distributor <- allocateParty "GoDistributor"
+  v <- expectRight (verifyQuoteWith distributor goSignerPubKey t0 goPayload goQuoteSig)
+  v.distributor === distributor
+  v.quote.feedId === "BTC/USD"
+  v.quote.price === 65000.0
+  v.quote.priceTime === t0
+  v.publishedAt === t0
+  v.canonicalHash === goPayloadHash
+  v.publicKey === goSignerPubKey
+  v.signature === goQuoteSig
+
+-- The Go signature is bound to its payload too: every field inside the quote
+-- envelope is covered.
+testGoQuoteSignatureBoundToPayload : Script ()
+testGoQuoteSignatureBoundToPayload = do
+  distributor <- allocateParty "GoDistributor"
+  let check payload = expectLeft "invalid signature"
+        (verifyQuoteWith distributor goSignerPubKey t0 payload goQuoteSig)
+  check (goPayload with quote = goPayload.quote with price = 65000.5)
+  check (goPayload with quote = goPayload.quote with feedId = "ETH/USD")
+  check (goPayload with quote = goPayload.quote with priceTime = addRelTime t0 (milliseconds 1))
+  check (goPayload with expiresAt = addRelTime t1 (milliseconds 1000))
+
+-- The two external fixtures are not interchangeable: each key verifies only its own
+-- implementation's signature, which rules out a fixture accidentally passing because
+-- the check is lax.
+testExternalFixturesDoNotCrossVerify : Script ()
+testExternalFixturesDoNotCrossVerify = do
+  distributor <- allocateParty "Distributor"
+  expectLeft "invalid signature"
+    (verifyQuoteWith distributor pythonPubKey t0 goPayload goQuoteSig)
+  expectLeft "invalid signature"
+    (verifyDataPointWith distributor goSignerPubKey t0 pythonPayload pythonSig)
+
+-- An externally signed payload is still subject to the validity window. However
+-- good its signature is, an expired payload is refused.
+testExternalSignaturesRespectExpiry : Script ()
+testExternalSignaturesRespectExpiry = do
+  distributor <- allocateParty "Distributor"
+  let past = addRelTime t1 (milliseconds 1)
+  expectLeft "payload expired"
+    (verifyQuoteWith distributor goSignerPubKey past goPayload goQuoteSig)
+  expectLeft "payload expired"
+    (verifyDataPointWith distributor pythonPubKey past pythonPayload pythonSig)

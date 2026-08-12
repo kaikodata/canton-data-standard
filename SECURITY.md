@@ -10,27 +10,32 @@ report and work with you on a fix and a coordinated disclosure.
 ## Scope
 
 This repository is the interface standard, its reference implementations, and
-its tests. The security-relevant surface is concentrated in the verifier
-interfaces, where an off-ledger ECDSA signature over a canonical encoding is
-checked on-ledger:
+its tests. The security-relevant surface is concentrated in the
+`canton-data-standard-codecs` utility library, where an off-ledger ECDSA
+signature over a structural hash of the payload is checked on-ledger:
 
-- the canonical encoding in `QuoteVerifierV1`, `PaidQuoteVerifierV1`,
-  `DataPointVerifierV1`, and `PaidDataPointVerifierV1`, where a mismatch between
-  an off-ledger signer and the on-ledger check is a correctness and trust issue.
-  The data point encoding is a recursive, length-prefixed TLV; a non-injective
-  encoding would let two distinct payloads collide on the same bytes and so let a
-  signature be reused for a payload the producer never signed, which makes
-  injectivity the security property the encoding has to hold,
-- the replay window (`expiresAt`) and the contract-resident public key, and
-- the paid path's settlement in `PaidQuoteVerifierV1` and
-  `PaidDataPointVerifierV1`, where the fee must not be redirectable.
+- the structural hash in `DataStandard.Codecs.StructuralHash` and the signed
+  envelopes in `DataStandard.Codecs.Envelope`, where a mismatch between an
+  off-ledger signer and the on-ledger check is a correctness and trust issue.
+  Injectivity is the security property the scheme has to hold: a
+  non-injective hash would let two distinct payloads collide on the same
+  digest, and so let a signature be reused for a payload the distributor never
+  signed. The type tags on `AnyValue` nodes and the count prefixes in the
+  combinators exist for exactly this reason, and the golden vectors in
+  `tests-codecs` are the normative record of the scheme,
+- the verify functions in `DataStandard.Codecs.Verify`, including the replay
+  window (`expiresAt`), and
+- the `DistributorKey` view holding the contract-resident public key and the
+  advertised payload codec.
 
-The reference producers, consumers, and the test token registry are
-illustrative, not production code. The registry in particular is a deliberately
-minimal stub, as its own module documents, and must not be deployed as-is.
+Because the codecs package is an upgradable utility package, a defect here is
+fixable in a new version without an ecosystem migration. An interface package
+is not, which is why the interface packages contain no executable code.
+
+The reference producers and consumers are illustrative, not production code.
 
 ## Supported versions
 
-The standard is pre-release (`0.1.2`). Fixes land on the current version line
+The standard is pre-release (`0.2.0`). Fixes land on the current version line
 until the first tagged release, after which this section will track which
 versions receive security updates.

@@ -1,0 +1,135 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Signature verification for the Data Standard's signed payloads: the checks a
+-- consumer runs, inside its own choice, on a payload a distributor signed
+-- off-ledger.
+--
+-- This is the only module in the package that touches the alpha `DA.Crypto.Text`
+-- builtins, which is why the package is built with `-Wno-crypto-text-is-alpha`.
+-- Code that merely calls these functions does not import that module and so
+-- needs no flag of its own. The hashing modules use the stable `DA.Text.sha256`
+-- throughout.
+--
+-- Verification is a pure function and not a choice on a standard interface. The
+-- consumer exercises `DistributorKey_Fetch` on the distributor's disclosed key
+-- contract, hands the view here, and acts on the result in the same transaction.
+-- Every validating participant therefore re-executes the check, and a bug in it
+-- is repaired by a new version of this package instead of being frozen into an
+-- interface.
+--
+-- Each function returns `Either Text` instead of aborting, so a caller decides
+-- whether a failed verification aborts its transaction or takes another branch.
+-- The `Left` messages are ordered and exact, and are part of this package's public
+-- surface: a caller that aborts on them propagates them unchanged.
+--
+-- Nothing in this package guards a delimiter, and nothing needs to. The
+-- structural hash takes field boundaries from the nesting: every leaf is hashed
+-- before it is joined, and only fixed-width hex digests are ever concatenated,
+-- so no value a distributor can choose can be confused with a boundary. An
+-- encoding that concatenated fields around a separator would need such a guard,
+-- since a free-text field containing that separator could shift a field boundary.
+module DataStandard.Codecs.Verify
+  ( verifyQuote
+  , verifyQuoteWith
+  , verifyDataPoint
+  , verifyDataPointWith
+  ) where
+
+import DA.Crypto.Text (secp256k1)
+
+import DataStandard.Codecs.Envelope
+  ( dataPointHashCodecId, hashSignedDataPoint, hashSignedQuote, quoteHashCodecId )
+import DataStandard.Codecs.StructuralHash (Hash)
+import DataStandard.DistributorKeyV1 (DistributorKeyView)
+import DataStandard.Utils
+  ( SignedDataPoint, SignedQuote, VerifiedDataPoint(..), VerifiedQuote(..) )
+
+-- | Verify a signed quote against a distributor's published key, and return the
+-- typed result.
+--
+-- The key's `payloadCodec` must name the quote envelope this package implements;
+-- a key published for another codec is refused instead of being checked against
+-- the wrong hash. The verified `distributor` comes from the key's view and never
+-- from the payload, so a payload cannot claim a distributor whose key did not
+-- sign it.
+--
+-- Failures, in the order they are checked: `"unsupported payload codec"`,
+-- `"published after expiry"`, `"payload expired"`, `"invalid signature"`.
+verifyQuote : DistributorKeyView -> Time -> SignedQuote -> Text -> Either Text VerifiedQuote
+verifyQuote key now payload signature = do
+  requireCodec quoteHashCodecId key
+  verifyQuoteWith key.distributor key.publicKey now payload signature
+
+-- | Verify a signed quote against a distributor and key the caller pins itself,
+-- for a caller that holds the distributor's key by some means other than a
+-- `DistributorKey` contract. Callers that read a published key should prefer
+-- `verifyQuote`, which additionally checks that the key was published for this
+-- envelope.
+--
+-- Failures, in the order they are checked: `"published after expiry"` (a validity
+-- window that ends before it begins is never live), `"payload expired"` (`now` is
+-- strictly after `expiresAt`; the boundary instant itself is accepted), and
+-- `"invalid signature"`.
+verifyQuoteWith : Party -> Text -> Time -> SignedQuote -> Text -> Either Text VerifiedQuote
+verifyQuoteWith distributor publicKey now payload signature = do
+  let rootHash = hashSignedQuote payload
+  requireWindow payload.publishedAt payload.expiresAt now
+  requireSignature rootHash publicKey signature
+  Right VerifiedQuote with
+    distributor
+    publishedAt = payload.publishedAt
+    quote = payload.quote
+    canonicalHash = rootHash.value
+    signature
+    publicKey
+
+-- | Verify a signed data point against a distributor's published key, and return
+-- the typed result. The key's `payloadCodec` must name the data point envelope
+-- this package implements.
+--
+-- Failures, in the order they are checked: `"unsupported payload codec"`,
+-- `"published after expiry"`, `"payload expired"`, `"invalid signature"`.
+verifyDataPoint : DistributorKeyView -> Time -> SignedDataPoint -> Text -> Either Text VerifiedDataPoint
+verifyDataPoint key now payload signature = do
+  requireCodec dataPointHashCodecId key
+  verifyDataPointWith key.distributor key.publicKey now payload signature
+
+-- | Verify a signed data point against a distributor and key the caller pins
+-- itself. The data point counterpart of `verifyQuoteWith`, running the same
+-- checks in the same order.
+verifyDataPointWith : Party -> Text -> Time -> SignedDataPoint -> Text -> Either Text VerifiedDataPoint
+verifyDataPointWith distributor publicKey now payload signature = do
+  let rootHash = hashSignedDataPoint payload
+  requireWindow payload.publishedAt payload.expiresAt now
+  requireSignature rootHash publicKey signature
+  Right VerifiedDataPoint with
+    distributor
+    publishedAt = payload.publishedAt
+    schemaVersion = payload.schemaVersion
+    values = payload.values
+    canonicalHash = rootHash.value
+    signature
+    publicKey
+
+-- | The key was published for the envelope this verification implements.
+requireCodec : Text -> DistributorKeyView -> Either Text ()
+requireCodec codecId key =
+  if key.payloadCodec == codecId then Right () else Left "unsupported payload codec"
+
+-- | The signed validity window is well formed and still open at `now`.
+requireWindow : Time -> Time -> Time -> Either Text ()
+requireWindow publishedAt expiresAt now
+  | publishedAt > expiresAt = Left "published after expiry"
+  | now > expiresAt = Left "payload expired"
+  | otherwise = Right ()
+
+-- | The signature is a valid signature over the payload's root hash under the
+-- distributor's key. The root hash hex is the builtin's message argument: the
+-- builtin decodes it and SHA-256s the resulting bytes, so an off-ledger signer
+-- signs ECDSA over the SHA-256 of the root hash's bytes.
+requireSignature : Hash -> Text -> Text -> Either Text ()
+requireSignature rootHash publicKey signature =
+  if secp256k1 signature rootHash.value publicKey
+    then Right ()
+    else Left "invalid signature"

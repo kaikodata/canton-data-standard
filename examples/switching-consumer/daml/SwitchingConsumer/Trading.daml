@@ -1,12 +1,12 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | The consumer side of the provider-switching demonstration. It depends only
+-- | The consumer side of the distributor-switching demonstration. It depends only
 -- on the interface packages and names no producer's template, so it reads any
--- `PublishedQuote` or `PublishedData` implementation through the interface.
--- Switching provider is re-pointing the trusted `(distributor, feedId)` pair
--- the consumer gates on, supplied as offer data, not a recompile: the two
--- structurally different providers in this demonstration are read by the same
+-- `PublishedQuote` or `PublishedDataPoint` implementation through the interface.
+-- To switch distributor you re-point the trusted `(distributor, feedId)` pair the
+-- consumer gates on, which arrives as offer data. Nothing is recompiled: the two
+-- structurally different distributors in this demonstration are read by the same
 -- compiled choices.
 module SwitchingConsumer.Trading where
 
@@ -23,8 +23,8 @@ template QuoteSwitchOffer
     buyer               : Party
     expectedDistributor : Party
       -- ^ The one distributor whose quote the buyer accepts. Pointing this at a
-      -- different party is the whole of switching provider: no other change, no
-      -- recompile.
+      -- different party is all there is to switching distributor; nothing else
+      -- changes and nothing is recompiled.
     feedId              : Text
       -- ^ The feed the buyer expects the quote to be for.
     quantity            : Decimal
@@ -37,12 +37,12 @@ template QuoteSwitchOffer
 
     -- | Settle the trade at the quoted price, in the buyer's transaction.
     --
-    -- Switching from one provider to another is passing a different
-    -- `expectedDistributor` to this same compiled choice: the gate below is the
-    -- only thing that distinguishes providers, and it reads offer data, not
-    -- code. The two structurally different providers in this demonstration, one
-    -- storing a price and one deriving a mid from a bid and an ask, are both
-    -- settled here without a single Daml change, because each exposes the same
+    -- Switching from one distributor to another means passing a different
+    -- `expectedDistributor` to this same compiled choice. The gate below is the
+    -- only thing that distinguishes distributors, and it reads offer data, never
+    -- code. The two structurally different distributors in this demonstration,
+    -- one storing a price and one deriving a mid from a bid and an ask, both
+    -- settle here without a single Daml change, because each exposes the same
     -- `PublishedQuote` view. The standard authenticates the distributor; the
     -- consumer confirms the feed. A production consumer would also bound the age
     -- of `publishedAt`.
@@ -75,26 +75,26 @@ template DataPointSwitchOffer
     buyer               : Party
     expectedDistributor : Party
       -- ^ The one distributor whose data the buyer accepts. Pointing this at a
-      -- different party is the whole of switching provider.
+      -- different party is all there is to switching distributor.
     assetPair           : Text
       -- ^ The feed the buyer expects the data point to be for.
     quantity            : Decimal
-    dataCid             : ContractId PublishedData
-      -- ^ Any `PublishedData` publication, identified through the interface
+    dataCid             : ContractId PublishedDataPoint
+      -- ^ Any `PublishedDataPoint` publication, identified through the interface
       -- rather than a concrete template.
   where
     signatory seller
     observer buyer
 
     -- | Settle the trade at the published price, in the buyer's transaction.
-    -- Reads `assetPair` and `price` from the payload and ignores any other
-    -- fields, so the market-maker provider's extra `bid`/`ask` keys are
+    -- Reads `assetPair` and `price` from the payload and ignores every other
+    -- field, so the market-maker distributor's extra `bid`/`ask` keys are
     -- harmless. The distributor gate is the switch point, exactly as in
     -- `AcceptQuoteSwitch`.
     choice AcceptDataPointSwitch : ContractId DataPointSwitchSettlement
       controller buyer
       do
-        v <- exercise dataCid PublishedData_Fetch with actor = buyer
+        v <- exercise dataCid PublishedDataPoint_Fetch with actor = buyer
         assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
         publishedPair <- required "assetPair" (lookupField "assetPair" v.values)
         assertMsg "asset pair mismatch" (publishedPair == assetPair)
@@ -112,8 +112,8 @@ template DataPointSwitchOffer
 
 -- | An offer to trade `quantity` of `feedId` only when two independent
 -- distributors agree on the price within `tolerance`, settling at the average
--- of the two. This trusts a set of distributors rather than one: N-of-M
--- agreement, here 2-of-2.
+-- of the two. The trust here is placed in a set of distributors instead of one:
+-- N-of-M agreement, at N = M = 2.
 template CrossCheckOffer
   with
     seller               : Party
@@ -126,21 +126,21 @@ template CrossCheckOffer
       -- ^ The feed both quotes are expected to be for.
     quantity             : Decimal
     tolerance            : Decimal
-      -- ^ The largest absolute price difference between the two providers the
+      -- ^ The largest absolute price difference between the two distributors the
       -- buyer will still settle on.
     quoteCidA            : ContractId PublishedQuote
-      -- ^ The first provider's quote, through the interface.
+      -- ^ The first distributor's quote, through the interface.
     quoteCidB            : ContractId PublishedQuote
-      -- ^ The second provider's quote, through the interface.
+      -- ^ The second distributor's quote, through the interface.
   where
     signatory seller
     observer buyer
 
-    -- | Settle only when both trusted providers agree within `tolerance`,
+    -- | Settle only when both trusted distributors agree within `tolerance`,
     -- pricing the trade at the average of the two. Each quote is gated against
     -- its own expected distributor and the shared feed; the standard
-    -- authenticates each distributor independently. Switching either provider
-    -- is re-pointing its `expectedDistributor`, just as in the single-provider
+    -- authenticates each distributor independently. Switching either distributor
+    -- is re-pointing its `expectedDistributor`, just as in the single-distributor
     -- offers.
     choice AcceptCrossCheck : ContractId CrossCheckSettlement
       controller buyer
@@ -151,7 +151,7 @@ template CrossCheckOffer
         assertMsg "untrusted distributor" (vB.distributor == expectedDistributorB)
         assertMsg "feed mismatch" (vA.quote.feedId == feedId)
         assertMsg "feed mismatch" (vB.quote.feedId == feedId)
-        assertMsg "providers disagree beyond tolerance"
+        assertMsg "distributors disagree beyond tolerance"
           (abs (vA.quote.price - vB.quote.price) <= tolerance)
         let settledPrice = (vA.quote.price + vB.quote.price) / 2.0
         create CrossCheckSettlement with
@@ -170,7 +170,7 @@ template CrossCheckOffer
 
 -- | The record of a trade settled off a single distributor's quote, capturing
 -- which distributor was used, the market time it priced (`priceTime`), and when
--- the provider produced it (`publishedAt`), so a later staleness review has
+-- the distributor produced it (`publishedAt`), so a later staleness review has
 -- both timestamps.
 template QuoteSwitchSettlement
   with
