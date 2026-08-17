@@ -1,10 +1,8 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | A reference producer for the Data Standard's `PublishedQuote` interface.
--- All a distributor has to do is what this module does: implement
--- `PublishedQuote` on a template the distributor signs. A consumer of the
--- standard reads the result without depending on this package.
+-- | A reference producer for `PublishedQuote`. A distributor's whole obligation
+-- is what this module does: implement the interface on a template it signs.
 module QuoteProducer.PriceOracle where
 
 import qualified DA.TextMap as TM
@@ -14,15 +12,14 @@ import DataStandard.Utils
 
 -- | A published price quote for a single feed.
 --
--- No observers, on purpose: a reader that is not a stakeholder gets the
--- contract by explicit disclosure and reads it through `PublishedQuote_Fetch`.
--- Publishing therefore costs the same however large the audience is.
+-- No observers, on purpose: a reader that is not a stakeholder obtains the
+-- contract by explicit disclosure and reads it through `PublishedQuote_Fetch`,
+-- so publishing costs the same at any audience size.
 template PriceQuote
   with
     oracle      : Party
       -- ^ The distributor; signs and owns the publication.
     feedId      : Text
-      -- ^ The feed this quote is for, for example "BTC/USD".
     price       : Decimal
     priceTime   : Time
       -- ^ The market time the price is observed for.
@@ -43,15 +40,13 @@ template PriceQuote
           values = TM.fromList [("exampleoracle.com/source", "reference-implementation")]
 
     -- | Publish a fresh quote by archiving this contract and creating its
-    -- replacement. A consumer still holding the archived contract's id fails
-    -- fast, which is preferable to it reading a stale quote. Revocation is the
-    -- same operation with no replacement created.
+    -- replacement, so a consumer holding the old contract id fails fast instead
+    -- of reading a stale quote. Revocation is the same with no replacement.
     choice UpdateQuote : ContractId PriceQuote
       with
         newPrice       : Decimal
         newPriceTime   : Time
         newPublishedAt : Time
-          -- ^ Must be later than the current `publishedAt`.
       controller oracle
       do
         assertMsg "publication time must increase" (newPublishedAt > publishedAt)

@@ -43,8 +43,11 @@ apart.
 
 - Every Daml source file carries the SPDX header that `scripts/check-headers.sh`
   enforces. New files carry it too.
-- Exported types, choices, and fields have doc comments. The exported API is
-  the product, so match the documentation style of the surrounding code.
+- Doc comments cover what a name does not: a field's meaning, a check's
+  ordering, a constraint an implementer has to honour. Keep them short, and do
+  not restate the code or repeat the guides in `docs/`.
+- The publishing party is the `distributor`, in every view and throughout the
+  prose. Earlier drafts said "provider"; do not reintroduce it.
 - A breaking change to an interface is a new `-v2` package, not an edit to a
   released `-v1`. See the versioning policy in the [README](README.md).
 - All executable code lives in the `canton-data-standard-codecs` utility

@@ -4,10 +4,9 @@ How to publish data that any consumer of the standard can read.
 
 ## What you implement
 
-An `interface instance` of `DataStandard.DataPointV1.PublishedDataPoint` on
-your own template, and nothing beyond that. Your package takes
-`data-dependencies` on the standard's DARs; consumers never import your
-package.
+An `interface instance` on a template you sign, and nothing beyond that. Your
+package takes `data-dependencies` on the standard's DARs; consumers never
+import your package.
 
 ```yaml
 # daml.yaml
@@ -16,10 +15,9 @@ data-dependencies:
   - <path-to>/canton-data-standard-datapoint-v1-0.2.0.dar
 ```
 
-The built DARs are committed under [`dars/`](../dars) so you can take them
-directly from the repository (or from a tagged GitHub Release); building from
-source with `dpm build --all` produces identical packages, which CI proves on
-every run.
+The built DARs are committed under [`dars/`](../dars), and are also attached to
+each tagged release. Building from source with `dpm build --all` produces
+identical packages, which CI proves on every run.
 
 ```daml
 import qualified DA.TextMap as TM
@@ -46,184 +44,140 @@ template PublishedPrice
         metadata      = emptyMetadata
 ```
 
-The full version of this producer lives in
-[`examples/datapoint-producer`](../examples/datapoint-producer).
+The full producer is [`examples/datapoint-producer`](../examples/datapoint-producer).
 
-## The view, field by field
-
-| Field | Meaning |
+| View field | Meaning |
 |---|---|
 | `distributor` | You, the party consumers decide to trust. |
-| `publishedAt` | When the data was produced. Consumers use it for staleness checks, so if the data's timestamp differs from the contract-creation time, use the data's timestamp. |
-| `schemaVersion` | Semantic version of your `values` schema (see below). |
+| `publishedAt` | When the data was produced, which is not necessarily when the contract was created. Consumers use it for staleness checks. |
+| `schemaVersion` | Semantic version of your `values` schema. |
 | `values` | The payload: field names to typed values, scalar or structured. |
-| `metadata` | Additive annotations under DNS-prefixed keys (see below). |
+| `metadata` | Additive annotations under DNS-prefixed keys. |
 
 ## The `values` payload
 
-`Values` maps field names to `AnyValue`, a closed set the standard governs:
-the scalars `Int`, `Decimal`, `Text`, `Time`, `Bool`, plus an ordered list and
-a string-keyed map. The list and map nest, so you can express a structured
-payload such as an index's constituents.
+`Values` maps field names to `AnyValue`: the scalars `Int`, `Decimal`, `Text`,
+`Time`, `Bool`, plus an ordered list and a string-keyed map. Lists and maps
+nest, so a structured payload such as an index's constituents is expressible.
 
-The set is closed because signature-based delivery reconstructs payload bytes
-canonically on-ledger, which needs one encoding per value. It lives in its own
-package (`canton-data-standard-utils-v1`), so a later version can widen it.
-Adding a constructor is a coordinated rollout, not a drop-in change: a reader
-built against an older version aborts on a constructor it does not know.
+The set is closed because the pull path reconstructs payloads on-ledger to
+check a signature, which needs one encoding per value. It lives in
+`canton-data-standard-utils-v1`, so a later version can widen it — a
+coordinated rollout, not a drop-in change, since a reader built against an
+older version aborts on a constructor it does not know.
 
-Build payloads with `insertField`, which converts native values to their
-tagged representation:
-
-```daml
-values = insertField "assetPair" assetPair
-       $ insertField "price"     price
-       $ insertField "confidence" (0.99 : Decimal)
-         TM.empty
-```
-
-For a structured field, insert a list or a map directly. An index's
-constituents, for example, is a list of maps:
+Build payloads with `insertField`, which tags native values:
 
 ```daml
 let constituent symbol weight =
       insertField "symbol" (symbol : Text)
         $ insertField "weight" (weight : Decimal) TM.empty
-values = insertField "constituents"
+values = insertField "assetPair" assetPair
+       $ insertField "price"     price
+       $ insertField "constituents"
            ([constituent "eurc-usd" 0.6, constituent "usdc-usd" 0.4] : [TextMap AnyValue])
            TM.empty
 ```
 
-Both delivery paths handle the full value set, nested lists and maps included.
-The contract-based (push) path relies on the ledger to serialize the payload.
-The signature-based (pull) path signs a structural hash of the same `AnyValue`
-tree, computed by the `canton-data-standard-codecs` library and described in
-[Distributing signed data](#distributing-signed-data-the-pull-path) below.
-
 Document your field names and types per feed, and version that contract with
-`schemaVersion`:
-
-- Patch (`1.0.0` to `1.0.1`): no schema-shape change, documentation or
-  semantics clarifications only.
-- Minor (`1.0.x` to `1.1.0`): adding fields. Existing consumers are
-  unaffected, since unknown fields read as `None`.
-- Major (`1.x` to `2.0.0`): renaming or removing fields, or changing a
-  field's type. Consumers must opt in.
+`schemaVersion`: patch for documentation or semantics clarifications, minor for
+added fields (unknown fields read as `None`, so existing consumers are
+unaffected), major for a rename, a removal or a type change.
 
 ## Metadata
 
-`metadata` holds machine-readable annotations that are not part of the data
-itself: provenance, methodology notes, links. Two conventions, shared with
-the Canton token standard's metadata usage:
-
-- Prefix keys with the DNS name of the application defining them:
-  `"exampleoracle.com/source"`, `"exampleoracle.com/methodology"`.
-- Keep entries small. On-ledger data is costly.
-
-Publish `emptyMetadata` when you have nothing to attach. An annotation is
-never a reason to widen the view shape; metadata exists so you do not have to.
+`metadata` holds machine-readable annotations that are not part of the data:
+provenance, methodology notes, links. Prefix keys with the DNS name of the
+application defining them (`"exampleoracle.com/source"`), and keep entries
+small, since on-ledger data is costly. Publish `emptyMetadata` when you have
+nothing to attach. Metadata exists so that an annotation is never a reason to
+widen a view.
 
 ## Publishing a typed quote
 
-For the common case of a single price on a feed, the standard offers a typed
-interface, `DataStandard.QuoteV1.PublishedQuote`, as an alternative to the
-generic data point. Its view has named fields instead of a `values` map, so
-there is no payload schema for a consumer to agree on.
-
-You implement it the same way, an `interface instance` on a template you sign.
-The economic content (feed, price, observation time) is a `Quote` record from
-`DataStandard.Utils`; the view wraps it with the provenance the quote omits:
+For a single price on a named feed, `DataStandard.QuoteV1.PublishedQuote` has
+named fields in the view, so there is no payload schema for a consumer to agree
+on. You implement it the same way. The economic content is a `Quote` record
+from `DataStandard.Utils`; the view adds the provenance the quote omits:
 
 ```daml
-import DataStandard.QuoteV1
-import DataStandard.Utils
-
-template PriceQuote
-  with
-    oracle      : Party
-    feedId      : Text
-    price       : Decimal
-    priceTime   : Time
-    publishedAt : Time
-  where
-    signatory oracle
-
-    interface instance PublishedQuote for PriceQuote where
-      view = PublishedQuoteView with
-        distributor = oracle
-        quote = Quote with feedId; price; priceTime
-        publishedAt
-        metadata    = emptyMetadata
+interface instance PublishedQuote for PriceQuote where
+  view = PublishedQuoteView with
+    distributor = oracle
+    quote       = Quote with feedId; price; priceTime
+    publishedAt
+    metadata    = emptyMetadata
 ```
 
-The view, field by field:
-
-| Field | Meaning |
-|---|---|
-| `distributor` | You, the party consumers decide to trust. |
-| `quote` | The economic content: a `Quote` record with `feedId` (the feed, for example `"BTC/USD"`), `price` (an exact base-10 fixed-point `Decimal`), and `priceTime` (the market time the price is observed for). |
-| `publishedAt` | When you produced the quote. Same meaning as `PublishedDataPoint.publishedAt`, and consumers use it for staleness. It is distinct from `quote.priceTime`, since a quote can be produced after the instant it prices. |
-| `metadata` | Additive annotations, the same convention as the data point. |
-
-`PublishedQuote` is independent of `PublishedDataPoint`. If you want a publication
-readable both as a typed quote and as a generic data point, implement both
-interfaces on the same template and set the shared fields, `distributor` and
-`publishedAt`, identically across the two views.
-
-Refresh, revocation, and distribution work the same as for a data point:
-archive-and-replace to publish a fresh quote (see `UpdateQuote` in
-[`examples/quote-producer`](../examples/quote-producer)), and explicit
-disclosure plus the `PublishedQuote_Fetch` choice to reach consumers who are not
-stakeholders.
-
-## Distributing signed data: the pull path
-
-Everything above pushes data onto the ledger: you create a contract per
-publication and refresh it by archive-and-replace. The pull path is the other
-delivery model. You sign the payload off-ledger with an ECDSA key, hand the
-signed bytes to consumers through your own channel (your API, a feed), and
-publish a single on-ledger contract: a `DistributorKey` (from
-`canton-data-standard-distributor-key-v1`) holding your public key, the
-`secp256k1`/`SHA-256` method pair, and the codec id your signatures cover
-(`v2-quote-hash` or `v2-datapoint-hash`). Nothing at all is published per
-payload.
-
-What you sign is the structural hash of the payload, computed by
-`canton-data-standard-codecs` (`hashSignedQuote` over a `SignedQuote`,
-`hashSignedDataPoint` over a `SignedDataPoint`, both records from `utils-v1`).
-An off-ledger signer needs only SHA-256, lowercase hex, string joins, and the
-scalar rendering rules; the golden vectors in `tests-codecs` are the normative
-record of the scheme, and the signature is ECDSA over the SHA-256 of the root
-hash's decoded bytes. This standard defines no on-ledger verification choice:
-a consumer calls the library's `verifyQuote`/`verifyDataPoint` from its own
-choice, against your disclosed `DistributorKey`. See
-[`examples/distributor-key-producer`](../examples/distributor-key-producer)
-for the key publication and rotation, and the
-[consumer guide](consumer-guide.md) for the verifying side.
-
-Key rotation is archive-and-replace on the key contract, the same lifecycle as
-every other publication (the example ships a `RotateKey` choice). Charging for
-pulled data, and leaving durable verification receipts, are not part of the
-standard. They are product concerns an implementor layers on top: a product
-template can hold the key, publish the `DistributorKey` view, and settle a fee
-in its own choice.
+`quote.priceTime` is the market instant the price is observed for;
+`publishedAt` is when you produced the quote, and a quote can be produced after
+the instant it prices. `PublishedQuote` is independent of `PublishedDataPoint`;
+implement both on one template if you want a publication readable either way,
+setting `distributor` and `publishedAt` identically across the two views. The
+full producer is [`examples/quote-producer`](../examples/quote-producer).
 
 ## Publication lifecycle
 
-Refresh is archive-and-replace: a consuming choice that creates the
-replacement (see `UpdatePrice` in the example). Consumers holding the old
-contract id fail fast on stale data instead of silently reading it.
-Revocation is the same operation without a replacement: archive the contract
-and it is gone, immediately.
+Refresh is archive-and-replace: a consuming choice that creates the replacement
+(`UpdatePrice`, `UpdateQuote` in the examples). A consumer holding the old
+contract id then fails fast instead of silently reading stale data. Revocation
+is the same operation without a replacement.
 
-## Distribution
+## Reaching consumers
 
-You do not need to enumerate your audience as observers. Share the contract
-through [explicit disclosure](https://docs.canton.network/appdev/deep-dives/explicit-contract-disclosure):
-hand the consumer the contract's `template_id`, `contract_id` and
-`created_event_blob` off-ledger (your API, a feed, etc.). Disclosure is
-tamper-evident, because a contract id is a hash of its contents, and the
-consumer reads via the interface's `PublishedDataPoint_Fetch` choice.
+A consumer can only read a contract it can see, and there are two ways to make
+one visible.
 
-Observers remain an option when the audience is small and known:
-stakeholders can read directly without disclosure.
+**Explicit disclosure.** Hand the consumer the contract's `template_id`,
+`contract_id` and `created_event_blob` off-ledger, over your own API or feed,
+and it attaches them to its command submission. See
+[explicit contract disclosure](https://docs.canton.network/appdev/deep-dives/explicit-contract-disclosure).
+Disclosure is tamper-evident, because a contract id is a hash of the contract's
+contents, and it costs the same whether one consumer reads a publication or a
+thousand do. The consumer reads through the interface's `_Fetch` choice, since
+it is not a stakeholder.
+
+**Observers.** Naming consumers as observers makes them stakeholders: they can
+`fetch` directly, and the publication reaches their participant's active
+contract set, which is what a query store such as PQS indexes. The cost is that
+the publication is stored and streamed per observer, so it grows with the
+audience. Use it when the audience is small and known, or when consumers need
+to discover publications by query rather than be handed contract ids.
+
+## The pull path
+
+Everything above pushes data onto the ledger. The pull path publishes nothing
+per payload: you sign the payload off-ledger with an ECDSA key, hand the signed
+bytes to consumers over your own channel, and publish a single long-lived
+contract implementing `DistributorKey` (from
+`canton-data-standard-distributor-key-v1`) that holds your public key, the
+`secp256k1`/`SHA-256` method pair, and the codec id your signatures cover.
+Reads never archive it, so no number of consumers verifying concurrently can
+contend.
+
+What you sign is the structural hash of the payload, computed by
+`canton-data-standard-codecs`: `hashSignedQuote` over a `SignedQuote`
+(codec id `v2-quote-hash`), `hashSignedDataPoint` over a `SignedDataPoint`
+(`v2-datapoint-hash`), both records from `utils-v1`. Both envelopes commit to a
+validity window (`publishedAt`, `expiresAt`); `expiresAt` is the only replay
+bound the standard defines, so a captured payload and signature stop verifying
+once it lapses. An off-ledger signer needs only SHA-256, lowercase hex, string
+joins and the scalar rendering rules; the signature itself is ECDSA over the
+SHA-256 of the root hash's decoded bytes. The golden vectors in `tests-codecs`
+are the normative record of the scheme.
+
+The standard defines no on-ledger verification choice: a consumer calls
+`verifyQuote`/`verifyDataPoint` from its own choice against your disclosed
+`DistributorKey`. See
+[`examples/distributor-key-producer`](../examples/distributor-key-producer) for
+the key publication and rotation, and the [consumer guide](consumer-guide.md)
+for the verifying side.
+
+Key rotation is archive-and-replace on the key contract (the example ships a
+`RotateKey` choice). Payloads signed under the old key stop verifying once it
+is archived, because consumers can no longer read it.
+
+Charging for pulled data and recording durable verification receipts are not
+part of the standard. They are product concerns layered on top: a product
+template can hold the key, publish the `DistributorKey` view, and settle a fee
+in its own choice.

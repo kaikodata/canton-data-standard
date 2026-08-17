@@ -1,17 +1,9 @@
-# Build order for the standard's packages. The interface packages and the codec
-# library live under interfaces/ (one package per interface version, plus the
-# version-free utility library); examples and tests build against their compiled
-# DARs.
+# Build order for the standard's packages: the interface packages and the codec
+# library under interfaces/, then the examples and tests that build against
+# their compiled DARs.
 #
 # Every package here depends only on daml-prim/daml-stdlib and on other packages
-# in this repo. The standard has no third-party dependency at all, so a consumer
-# vendors these DARs and nothing else.
-#
-# The `tests` suite is both token-free and crypto-free, so its DAR runs under the
-# live Ledger API gate. `tests-codecs` proves the hashing surface needs no
-# alpha-crypto flag, and `tests-crypto` covers the signature checks; both are
-# in-memory only, because Daml Script's keypair helpers cannot load on the live
-# runner.
+# in this repo, so a consumer vendors these DARs and nothing else.
 packages:
 - ./interfaces/canton-data-standard-utils-v1
 - ./interfaces/canton-data-standard-datapoint-v1

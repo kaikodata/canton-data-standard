@@ -2,24 +2,15 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 -- | The cross-language signer path: signatures produced entirely outside Daml
--- verify through this library, unchanged.
+-- verify through this library, unchanged. Every other crypto test signs with
+-- Daml Script's helpers, which says nothing about a third-party signer. Here
+-- both the hash and the ECDSA signature come from elsewhere: the data point
+-- fixture from a Python reference (pyca/cryptography) over the normative
+-- `gvEnvelope` payload, the quote fixture from the Go signer in
+-- `pkg/cantonpulloracle` over `gvQuoteTyped`, with RFC 6979 nonces.
 --
--- This is the standard's central interoperability claim, and the only test module
--- that can substantiate it. Every other crypto test signs with Daml Script's own
--- helpers, which proves the library is self-consistent but says nothing about a
--- third-party signer. Here both the structural hash and the ECDSA signature were
--- computed by other implementations, from the written scheme:
---
---   * the data point fixture by a Python reference (pyca/cryptography) over the
---     normative `gvEnvelope` payload;
---   * the quote fixture by the Go signer in `pkg/cantonpulloracle` over the
---     normative `gvQuoteTyped` payload, with RFC 6979 deterministic nonces.
---
--- That is two implementations in two languages, under two key pairs, agreeing on
--- one hash scheme. Every constant below is a fixture from elsewhere, and none of
--- them may be regenerated to make a test pass. A failure here means this
--- library's hash or its signature check has diverged from the scheme the
--- fixtures were made under.
+-- No constant below may be regenerated to make a test pass: a failure means
+-- this library has diverged from the scheme the fixtures were made under.
 module Test.ExternalSignerTest where
 
 import DA.Assert ((===))

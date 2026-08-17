@@ -1,69 +1,66 @@
 # canton-data-standard
 
 Versioned Daml interfaces for publishing and consuming market data on
-[Canton](https://docs.canton.network/), without coupling consumers to any
-distributor's Daml package.
+[Canton](https://docs.canton.network/). A distributor publishes by implementing
+a standard interface on its own template; a consumer reads through that
+interface. Neither side depends on the other's package.
 
-A distributor publishes market data by implementing a shared interface on its
-own contracts. A consumer reads that data through the same interface. Neither
-side depends on the other's code, only on the interface packages in this
-repository.
+The standard covers two delivery models.
 
-The standard is three interfaces plus a utility library. The push interfaces
-(`PublishedDataPoint`, `PublishedQuote`) distribute data as on-ledger contracts
-the distributor signs as a Daml party. The `DistributorKey` interface publishes
-a distributor's off-ledger signing key, so data signed off-ledger (an ECDSA
-signature over a structural hash of the payload) can be pulled and
-authenticated on demand by anyone. The verification itself is library code in
-`canton-data-standard-codecs`, called from the consumer's own choice. An
-interface package holds views and one-line fetch choices; all executable code
-(hashing, codecs, signature checks) lives in the utility library, which can be
-upgraded at any time.
+**Push.** The distributor creates a contract per publication, implementing
+`PublishedDataPoint` (a generic key/value payload) or `PublishedQuote` (a typed
+price for a named feed). The Daml party that signs the contract is the
+authenticated source.
 
-The generic `PublishedDataPoint` interface fixes the shape a consumer reads: a
-distributor, a publication time, a schema version, and a key/value payload. It
-does not fix the keys inside that payload. A consumer and the distributors it
-reads agree on those out of band, and `schemaVersion` identifies the agreement;
-switching to another distributor of the same schema is a configuration change:
-which distributor party to trust. A typed interface such as `PublishedQuote`
-has named fields in the view itself and drops the schema agreement for the
-feeds it covers. The interfaces are versioned, so the shape a consumer builds
-against stays fixed for the life of a version.
+**Pull.** The distributor signs payloads off-ledger with an ECDSA key and
+delivers them over its own channel. On-ledger it publishes one long-lived
+contract implementing `DistributorKey`; a consumer authenticates any number of
+payloads against it by calling `canton-data-standard-codecs` from its own
+choice. There is no verifier interface and nothing on-ledger per payload.
+
+Interface packages hold a view and one `_Fetch` choice, and no executable code.
+A package that defines an interface can never be smart-contract-upgraded, so a
+bug in code placed there would be unfixable. Hashing, codecs and signature
+checks all live in `canton-data-standard-codecs`, a utility package whose
+versions are mutually upgrade-compatible.
+
+`PublishedDataPoint` fixes the shape a consumer reads — distributor,
+publication time, schema version, key/value payload — but not the keys inside
+the payload. A consumer and its distributors agree on those out of band, and
+`schemaVersion` identifies the agreement. `PublishedQuote` has named fields in
+the view instead, so the feeds it covers need no such agreement.
 
 ## Packages
 
 | Path | Package | What it is |
 |---|---|---|
-| `interfaces/canton-data-standard-utils-v1` | `canton-data-standard-utils-v1` | The shared value model: `AnyValue`/`Values`, the `Quote` record, `Metadata`, typed accessors, and the serializable signed/verified payload records (`SignedQuote`, `SignedDataPoint`, `VerifiedQuote`, `VerifiedDataPoint`). Data-only, so it can evolve through smart-contract upgrades, which interface-defining packages cannot. Its `Metadata` and `AnyValue` mirror the Canton Token Standard's types instead of importing them, which is what keeps the standard free of a token-standard dependency. |
-| `interfaces/canton-data-standard-datapoint-v1` | `canton-data-standard-datapoint-v1` | The generic `PublishedDataPoint` interface: a key/value payload (`Values`), publication time, schema version, and extensibility metadata. It holds a view and a fetch choice, nothing else. |
-| `interfaces/canton-data-standard-quote-v1` | `canton-data-standard-quote-v1` | The typed `PublishedQuote` interface: a `Quote` (feed, price, and observation time) plus a publication time and extensibility metadata. Independent of `PublishedDataPoint`, and again a view and a fetch choice only. |
-| `interfaces/canton-data-standard-distributor-key-v1` | `canton-data-standard-distributor-key-v1` | The `DistributorKey` interface: a long-lived contract publishing a distributor's secp256k1 public key, hash and signature method, and the payload codec its signatures cover. A view and a fetch choice; verification happens in the consumer's own choice through the codecs library. |
-| `interfaces/canton-data-standard-codecs` | `canton-data-standard-codecs` | The utility library, and the only package with executable code: the structural hash (combinators and the type-tagged `AnyValue` instance), the `Quote` ⇄ `Values` codecs, the signed-payload envelope hashes (`v2-quote-hash`, `v2-datapoint-hash`), and the `verifyQuote`/`verifyDataPoint` signature checks. Built as a utility package, so any two versions are SCU-compatible and bug fixes ship without an ecosystem migration. Only the verify functions touch the alpha crypto surface; hashing uses the stable `DA.Text.sha256`. |
-| `examples/datapoint-producer` | `datapoint-producer-example` | A reference producer: a price-publication template implementing `PublishedDataPoint`. |
-| `examples/datapoint-consumer` | `datapoint-consumer-example` | A reference consumer: a trade workflow that reads any `PublishedDataPoint` implementation. Depends only on the interface packages. |
-| `examples/quote-producer` | `quote-producer-example` | A reference producer: a quote-publication template implementing `PublishedQuote`. |
-| `examples/quote-consumer` | `quote-consumer-example` | A reference consumer: a trade workflow that reads any `PublishedQuote` implementation. Depends only on the interface packages. |
-| `examples/switching-distributor-direct` | `switching-distributor-direct-example` | A reference distributor for the distributor-switching demonstration: stores a price directly and implements both `PublishedQuote` and `PublishedDataPoint` on one template. |
-| `examples/switching-distributor-marketmaker` | `switching-distributor-marketmaker-example` | A second, structurally different distributor: stores a bid and an ask and derives the mid, exposing the same views as the direct distributor. |
-| `examples/switching-consumer` | `switching-consumer-example` | A reference consumer that reads the same feed from either distributor unchanged, gating on a trusted `(distributor, feedId)` pair, and that cross-checks two distributors for agreement. Depends only on the interface packages. |
-| `examples/distributor-key-producer` | `distributor-key-producer-example` | A reference distributor for the pull path: a template implementing `DistributorKey`, holding the public key and advertising its payload codec, with a key-rotation choice. |
-| `examples/distributor-key-consumer` | `distributor-key-consumer-example` | A reference consumer for the pull path: a trade workflow that authenticates an off-ledger-signed quote in its own choice through the codecs library, against a disclosed `DistributorKey`. Needs no crypto build flag of its own. |
-| `tests` | `canton-data-standard-tests` | Daml Script tests for the push interfaces and the `DistributorKey` view. Token-free and crypto-free, so its DAR runs against a live Canton ledger. |
-| `tests-codecs` | `canton-data-standard-tests-codecs` | Daml Script tests for the structural hash and the codecs: the normative golden vectors, the tag-injectivity and ordering properties, and the `Quote` ⇄ `Values` round-trips. It builds without the alpha crypto flag, which is how the hashing surface is held to the stable standard library. |
-| `tests-crypto` | `canton-data-standard-tests-crypto` | Daml Script tests for the `verifyQuote`/`verifyDataPoint` signature paths, including signatures produced entirely outside Daml. Kept separate because they use Daml Script's `secp256k1` helpers, whose values the live-ledger script runner cannot load. They run in-memory. |
+| `interfaces/canton-data-standard-utils-v1` | `canton-data-standard-utils-v1` | Shared data types: `AnyValue`/`Values`, `Quote`, `Metadata`, and the signed and verified payload records (`SignedQuote`, `SignedDataPoint`, `VerifiedQuote`, `VerifiedDataPoint`). Data-only, so it evolves through smart-contract upgrades. Its `Metadata` and `AnyValue` mirror the Canton Token Standard's types instead of importing them, which keeps the standard free of that dependency. |
+| `interfaces/canton-data-standard-datapoint-v1` | `canton-data-standard-datapoint-v1` | The generic `PublishedDataPoint` interface: `values`, `publishedAt`, `schemaVersion`, `metadata`. |
+| `interfaces/canton-data-standard-quote-v1` | `canton-data-standard-quote-v1` | The typed `PublishedQuote` interface: a `Quote` (feed, price, observation time) plus `publishedAt` and `metadata`. Independent of `PublishedDataPoint`. |
+| `interfaces/canton-data-standard-distributor-key-v1` | `canton-data-standard-distributor-key-v1` | The `DistributorKey` interface: a distributor's secp256k1 public key, its hash and signature methods, and the payload codec its signatures cover. |
+| `interfaces/canton-data-standard-codecs` | `canton-data-standard-codecs` | The utility library, and the only executable code in the standard: the structural hash, the `Quote` ⇄ `Values` codecs, the signed envelopes (`v2-quote-hash`, `v2-datapoint-hash`) and `verifyQuote`/`verifyDataPoint`. Only the verify functions touch the alpha crypto builtins; hashing uses the stable `DA.Text.sha256`. |
+
+`examples/` holds a reference producer and consumer for each path
+(`datapoint-*`, `quote-*`, `distributor-key-*`), plus a distributor-switching
+demonstration (`switching-*`) in which one consumer reads two structurally
+different distributors unchanged. The consumers there depend only on this
+repository's packages, never on a distributor's.
+
+`tests/` covers the push interfaces and is token-free and crypto-free, so its
+DAR also runs against a live Canton ledger. `tests-codecs/` holds the normative
+golden vectors for the structural hash and builds without the alpha crypto
+flag. `tests-crypto/` covers the signature paths, including signatures produced
+entirely outside Daml, and runs in-memory only.
 
 The built interface DARs are committed under `dars/` so they can be taken
-straight from the repository, and every CI run proves they are identical to a
+straight from the repository; CI proves on every run that they match a
 from-source rebuild (`make dars-check`, a package-id comparison). Tagged
-releases attach the same DARs to a GitHub Release.
+releases attach the same files to a GitHub Release.
 
 ## Build and test
 
-Requirements: [dpm](https://docs.digitalasset.com/) (the Daml Package
-Manager) and a JDK (17+). The packages pin Daml SDK `3.4.11`
-(`dpm install 3.4.11`).
-
-A `Makefile` wraps the common tasks, and CI runs `make ci`:
+Requirements: [dpm](https://docs.digitalasset.com/) (the Daml Package Manager)
+and a JDK (17+). The packages pin Daml SDK `3.4.11` (`dpm install 3.4.11`).
 
 ```bash
 make build          # dpm build --all
@@ -77,36 +74,29 @@ make clean          # remove build artifacts
 make ci             # headers-check, build, validate, test and dars-check
 ```
 
-## Reading and writing data
+## Guides
 
 - [Producer guide](docs/producer-guide.md): implement `PublishedDataPoint`,
-  `PublishedQuote`, or `DistributorKey` on your own template and distribute,
-  by push or by off-ledger signing.
+  `PublishedQuote` or `DistributorKey` on your own template, and distribute by
+  push or by off-ledger signing.
 - [Consumer guide](docs/consumer-guide.md): read published data through the
-  interface, including contracts you are not a stakeholder of, whether pushed to
-  you or pulled and verified on demand through the codecs library.
+  interfaces, whether pushed to you or pulled and verified on demand.
 
 ## Versioning policy
 
-The standard versions four things independently:
-
-1. The interface version lives in the package and module name
-   (`...-datapoint-v1`, `DataStandard.DataPointV1`). A breaking change to an
-   interface is a new `-v2` package. That is the one ecosystem-wide migration
-   point; `v1` stays available and nothing changes under existing consumers.
-2. The payload schema version is a field on the generic data point view
-   (`schemaVersion`, semantic versioning). It describes the `values` content of
-   a given feed and evolves per producer, independently of the interface. A
-   typed interface such as the quote has no separate payload schema; its
-   interface version is its schema.
-3. Metadata on every view handles additive evolution. New annotations are
-   added as metadata entries under DNS-prefixed keys instead of as view-shape
-   changes, so existing readers keep working.
-4. The codecs utility package has no `-v1` suffix: any two versions of a
-   utility package are SCU-compatible, so fixes and additions ship as ordinary
-   version bumps. The signed-payload encodings themselves are versioned by
-   codec id (`v2-quote-hash`, `v2-datapoint-hash`), advertised on the
-   `DistributorKey` view.
+1. The interface version is in the package and module name (`...-datapoint-v1`,
+   `DataStandard.DataPointV1`). A breaking change is a new `-v2` package, and
+   that is the only ecosystem-wide migration point: `v1` stays available.
+2. The payload schema version is a field on the generic view (`schemaVersion`,
+   semantic versioning). It describes one feed's `values` content and evolves
+   per distributor. A typed interface has no separate payload schema.
+3. `metadata` on every view carries additive evolution: new annotations go in
+   as DNS-prefixed entries instead of view-shape changes.
+4. The codecs package has no `-v1` suffix, because any two versions of a
+   utility package are upgrade-compatible; fixes ship as ordinary version
+   bumps. The signed encodings are versioned separately by codec id
+   (`v2-quote-hash`, `v2-datapoint-hash`), advertised on the `DistributorKey`
+   view.
 
 ## License
 

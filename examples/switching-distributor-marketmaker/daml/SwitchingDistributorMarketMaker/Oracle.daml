@@ -1,13 +1,13 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | A reference producer for the distributor-switching demonstration: a
--- structurally different oracle. It stores a bid and an ask rather than a
--- price, and derives the mid `(bid + ask) / 2` for the views. It implements
--- the same two interfaces as `SwitchingDistributorDirect.Oracle` and exposes the
--- identical view shape, so a consumer reading through the interface cannot tell
--- the two distributors apart. This proves the consumer is decoupled from how the
--- data is stored, not only from which party publishes it.
+-- | A reference distributor for the switching demonstration: a structurally
+-- different oracle. It stores a bid and an ask rather than a price and derives
+-- the mid for the views, but implements the same two interfaces as
+-- `SwitchingDistributorDirect.Oracle` and exposes the identical view shape. A
+-- consumer reading through the interfaces cannot tell the two apart, which is
+-- what shows the consumer is decoupled from how the data is stored and not only
+-- from which party publishes it.
 module SwitchingDistributorMarketMaker.Oracle where
 
 import qualified DA.TextMap as TM
@@ -16,27 +16,18 @@ import DataStandard.DataPointV1
 import DataStandard.QuoteV1
 import DataStandard.Utils
 
--- | A published two-sided market for a single feed. The price the views expose
--- is the mid, computed from the bid and ask rather than stored.
---
--- As with the direct distributor, there are no observers: a non-stakeholder
--- reader obtains the contract by explicit disclosure and reads it through an
--- interface's `_Fetch` choice, and publishing costs the same at any audience
--- size.
+-- | A published two-sided market for a single feed; the views expose the mid.
+-- No observers, as with the direct distributor.
 template MarketMakerQuote
   with
     oracle      : Party
       -- ^ The distributor; signs and owns the publication.
     feedId      : Text
-      -- ^ The feed this market is for in the typed view, for example "BTC/USD".
+      -- ^ The feed, as named by the typed view.
     assetPair   : Text
-      -- ^ The same feed under the key the generic payload uses. Held separately
-      -- from `feedId` so the two views can name the feed by their own
-      -- conventions; a distributor serving one feed sets them equal.
+      -- ^ The same feed under the key the generic payload uses.
     bid         : Decimal
-      -- ^ The price the market maker bids; the lower side of the mid.
     ask         : Decimal
-      -- ^ The price the market maker asks; the upper side of the mid.
     priceTime   : Time
       -- ^ The market time the two-sided market is observed for.
     publishedAt : Time
@@ -69,16 +60,13 @@ template MarketMakerQuote
           values = TM.fromList [("examplemarketmaker.com/source", "reference-implementation")]
 
     -- | Publish a fresh market by archiving this contract and creating its
-    -- replacement. Once the old publication is archived, a consumer holding its
-    -- contract id fails fast instead of reading a stale market. Revoking a feed
-    -- is the same operation with no replacement created.
+    -- replacement, so a consumer holding the old contract id fails fast.
     choice UpdateMarketMakerQuote : ContractId MarketMakerQuote
       with
         newBid         : Decimal
         newAsk         : Decimal
         newPriceTime   : Time
         newPublishedAt : Time
-          -- ^ Must be later than the current `publishedAt`.
       controller oracle
       do
         assertMsg "publication time must increase" (newPublishedAt > publishedAt)

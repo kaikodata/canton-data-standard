@@ -1,20 +1,10 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | The codec between the typed `Quote` and the generic `Values` payload, in both
--- directions.
---
--- A quote is a data point with a known schema, so a consumer that reads generic
--- data points can read quotes too, and a distributor that publishes quotes can
--- expose them on the generic interface without a second payload shape. Verifying
--- a quote needs neither direction: the quote envelope hashes a `Quote` as a typed
--- record and never passes through `Values`. This codec exists for consumers and
--- distributors that want the generic form, and is no part of the signing path.
---
--- `valuesToQuote` is strict on purpose: exactly the three fields, each at exactly
--- its expected type, and nothing else. A payload with an extra field is rejected
--- and not ignored, because silently dropping a field would let two different
--- payloads decode to the same quote.
+-- | The codec between the typed `Quote` and the generic `Values` payload, in
+-- both directions, for consumers and distributors that want the generic form.
+-- It is no part of the signing path: the quote envelope hashes a `Quote` as a
+-- typed record and never passes through `Values`.
 module DataStandard.Codecs.QuoteValues
   ( quoteToValues
   , valuesToQuote
@@ -39,9 +29,8 @@ priceField = "price"
 priceTimeField : Text
 priceTimeField = "priceTime"
 
--- | Render a quote as a generic payload: `feedId` as text, `price` as a decimal,
--- and `priceTime` as a time. Total, and the inverse of `valuesToQuote` on every
--- quote.
+-- | Render a quote as a generic payload. Total, and the inverse of
+-- `valuesToQuote` on every quote.
 quoteToValues : Quote -> Values
 quoteToValues q = TM.fromList
   [ (feedIdField, AVText q.feedId)
@@ -49,10 +38,10 @@ quoteToValues q = TM.fromList
   , (priceTimeField, AVTime q.priceTime)
   ]
 
--- | Read a quote back out of a generic payload, or explain why the payload is not
--- one. The payload must hold exactly the three quote fields, each under its
--- expected tag; a missing field, a field of the wrong type, and an unrecognised
--- field are each rejected, and the message names the field at fault.
+-- | Read a quote back out of a generic payload, or explain why the payload is
+-- not one. Strict on purpose: exactly the three quote fields, each under its
+-- expected tag, and nothing else, so that two different payloads cannot decode
+-- to the same quote. The message names the field at fault.
 valuesToQuote : Values -> Either Text Quote
 valuesToQuote values = do
   feedId <- requireText feedIdField

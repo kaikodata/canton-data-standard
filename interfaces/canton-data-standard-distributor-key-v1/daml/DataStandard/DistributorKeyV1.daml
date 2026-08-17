@@ -1,71 +1,54 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | The signing-key publication interface of the Data Standard. A distributor
--- that delivers data by signature rather than by contract implements
--- `DistributorKey` on its own template, so a consumer can learn the public key
--- to check that distributor's signatures against without depending on the
--- distributor's package.
+-- | The signing-key publication interface. A distributor that delivers data by
+-- signature rather than by contract implements `DistributorKey` on its own
+-- template, so consumers can learn the key to check its signatures against.
 --
--- This package holds a view and one read choice, and no more than that.
--- Verification itself is library code in `canton-data-standard-codecs`,
--- executed inside the consumer's own choice. A package that defines a Daml
--- interface can never be smart-contract-upgraded, so any code placed here
--- would be unfixable; a bug in the library is repaired by a new version of it.
+-- This package holds a view and one read choice, and no more. Verification is
+-- library code in `canton-data-standard-codecs`, run inside the consumer's own
+-- choice: a package defining an interface can never be smart-contract-upgraded,
+-- so code placed here would be unfixable.
 module DataStandard.DistributorKeyV1 where
 
--- | The on-ledger view every `DistributorKey` implementation exposes. It names
--- the party whose signatures the key validates, the key itself, and the three
--- identifiers a consumer needs to pick the matching off-ledger recipe: how the
--- payload is hashed, how the hash is signed, and which encoding the hash is
--- taken over.
+-- | The view every `DistributorKey` implementation exposes: the party whose
+-- signatures the key validates, the key, and the three identifiers that select
+-- the matching off-ledger recipe.
 --
 -- The key is resident on a contract the distributor signs, which is what makes
 -- it trustworthy: verification uses this key and not one the caller supplied.
--- Explicit disclosure of the contract is tamper-evident, because a contract id
--- commits to the contract's contents.
 data DistributorKeyView = DistributorKeyView with
     distributor : Party
-      -- ^ The party whose signatures this key validates, and whom the consumer
-      -- chooses to trust as its source. Verification copies this field into its
-      -- result, so a verified payload names an authenticated distributor and
-      -- not one the payload itself claimed.
+      -- ^ The party whose signatures this key validates. Verification copies it
+      -- into its result, so a verified payload names an authenticated
+      -- distributor and not one the payload itself claimed.
     publicKey : Text
       -- ^ The distributor's secp256k1 public key, hex-encoded DER (SPKI). One
-      -- key authenticates every feed the distributor signs; rotation is
-      -- replacement of the contract instance.
+      -- key authenticates every feed the distributor signs.
     signMethod : Text
-      -- ^ The signature scheme the key is used with. `"secp256k1"` for every
-      -- implementation the Data Standard currently defines.
+      -- ^ The signature scheme. `"secp256k1"` for every implementation the
+      -- standard currently defines.
     hashMethod : Text
-      -- ^ The hash function the signature scheme is applied over. `"SHA-256"`
-      -- for every implementation the Data Standard currently defines.
+      -- ^ The hash function the scheme is applied over. `"SHA-256"` for every
+      -- implementation the standard currently defines.
     payloadCodec : Text
       -- ^ The identifier of the encoding this key signs, for example
-      -- `"v2-quote-hash"`. It selects the off-ledger encoder a distributor's
-      -- signer must use and the library function a consumer verifies with; the
-      -- library rejects a payload whose codec id does not match the one it
-      -- implements. Products advertise their own ids here, so a codec that is
-      -- not part of the Data Standard is named on the same field.
+      -- `"v2-quote-hash"`. It selects the off-ledger encoder the signer must
+      -- use and the library function a consumer verifies with; verification
+      -- rejects a key whose codec id it does not implement. Products advertise
+      -- their own ids on this field.
   deriving (Eq, Show)
 
--- | The signing-key publication interface. A distributor implements it on its
--- own template; consumers read the view through it and never import the
--- distributor's package.
---
--- Key rotation is instance replacement: archive the contract and create its
--- replacement holding the new key. A distributor's template adds its own
--- rotation choice for this. The interface defines none, because rotation policy
--- belongs to the distributor.
+-- | The signing-key publication interface. Key rotation is instance
+-- replacement, through a choice on the distributor's own template: rotation
+-- policy belongs to the distributor, so the interface defines none.
 interface DistributorKey where
   viewtype DistributorKeyView
 
-  -- | Read the view from a contract the caller can see. This is the read path
-  -- for a party that is not a stakeholder of the contract: such a party obtains
-  -- the contract through explicit disclosure, which grants visibility but not
-  -- the authority to `fetch`, and so reads by exercising this choice, which the
-  -- caller alone authorises. The choice is nonconsuming, and what it returns is
-  -- the view, not the implementing template.
+  -- | Read the view from a contract the caller can see. A party holding the
+  -- contract by explicit disclosure is not a stakeholder and so cannot `fetch`
+  -- it; this choice is authorised by the caller alone, and returns the view
+  -- rather than the implementing template.
   nonconsuming choice DistributorKey_Fetch : DistributorKeyView
     with
       actor : Party

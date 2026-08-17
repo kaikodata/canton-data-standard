@@ -6,16 +6,13 @@
 -- structural root hash with `secp256k1sign`, and checks the result through the
 -- library.
 --
--- Verification is a pure function, so `now` is passed in explicitly instead of
--- being read from the ledger. The tests exploit that: every time in this module
--- is a fixed epoch-millisecond value, so no assertion depends on when the suite
--- runs. The payload is the golden `gvQuoteTyped` quote, chosen to tie the
--- signature checks to the normative vector. A change to the envelope that broke
--- the vector would also break the `canonicalHash` assertions here.
+-- Verification is a pure function, so `now` is passed in explicitly and every
+-- time here is a fixed epoch-millisecond value: no assertion depends on when
+-- the suite runs. The payload is the golden `gvQuoteTyped` quote, which ties
+-- these checks to the normative vector.
 --
--- The failure messages are asserted exactly, because they are part of the
--- library's public surface: a consumer that aborts on them propagates them
--- unchanged, so a reworded message is a breaking change for consumers.
+-- Failure messages are asserted exactly, because they are part of the library's
+-- public surface: a consumer that aborts on them propagates them unchanged.
 --
 -- Daml Script's crypto helpers run in-memory only, which is why this suite is
 -- separate from the live-runner `tests` package.

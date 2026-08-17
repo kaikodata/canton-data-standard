@@ -1,46 +1,32 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | A reference distributor for signature-based delivery. Such a distributor's
--- entire on-ledger obligation is one contract: hold the public key on a template
--- the distributor signs, implement `DistributorKey` so consumers can read it,
--- and disclose it to them.
---
--- Everything else happens off-ledger or on the consumer's side. The distributor
--- signs payloads with the matching private key outside Daml and delivers them by
--- whatever channel it likes; the consumer verifies them inside its own choice
--- using `canton-data-standard-codecs`. There is no verifier interface and no
--- verify choice here. A distributor publishes a key; it does not run
--- verifications on behalf of consumers.
+-- | A reference distributor for the pull path. Its entire on-ledger obligation
+-- is one contract: hold the public key on a template it signs, implement
+-- `DistributorKey` so consumers can read it, and disclose it to them. Signing
+-- happens off-ledger and verification happens in the consumer's own choice, so
+-- there is no verify choice here.
 --
 -- The publication is long-lived and contention-free: a read never archives it,
--- and one contract authenticates every feed and every payload the key signs, so
--- no number of consumers verifying concurrently can conflict.
+-- and one contract authenticates every payload the key signs.
 module DistributorKeyProducer.Publication where
 
 import DataStandard.DistributorKeyV1
 
--- | A distributor's published signing key. Created once and disclosed to
--- consumers, who read it through the `DistributorKey` interface and never import
--- this module.
---
--- The scheme fields (`signMethod`, `hashMethod`) are fixed by the standard and set
--- to their constants in the view. `payloadCodec` is a template field, because
--- which envelope a key signs is the distributor's configuration: one key signs
--- quotes, another signs data points, and a product may advertise a codec of its
--- own.
+-- | A distributor's published signing key. The scheme fields are fixed by the
+-- standard and set to their constants in the view; `payloadCodec` is a template
+-- field, because which envelope a key signs is the distributor's configuration.
 template DistributorKeyPublication
   with
     distributor : Party
-      -- ^ The distributor; signs and owns the publication, and is the party whose
-      -- signatures this key validates.
+      -- ^ The distributor; signs and owns the publication, and is the party
+      -- whose signatures this key validates.
     publicKey : Text
       -- ^ The distributor's hex DER-SPKI secp256k1 public key.
     payloadCodec : Text
       -- ^ The envelope this key signs, for example the codecs package's
-      -- `quoteHashCodecId`. A consumer's verification refuses a key whose codec is
-      -- not the one it verifies against, so this field is what binds a key to a
-      -- payload shape.
+      -- `quoteHashCodecId`. Verification refuses a key whose codec is not the
+      -- one it implements, so this field binds a key to a payload shape.
   where
     signatory distributor
 
@@ -53,17 +39,11 @@ template DistributorKeyPublication
         payloadCodec
 
     -- | Rotate the signing key by archiving this publication and creating its
-    -- replacement carrying the new key.
-    --
-    -- Payloads signed under the old key stop verifying the moment this contract is
-    -- archived, because a consumer can no longer read the old key: the archived
-    -- contract id resolves for nobody, disclosed or not. Payloads signed under the
-    -- new key verify against the replacement, which the distributor discloses in
-    -- turn. How a consumer learns that rotation happened sits outside the
-    -- standard, in the distribution relationship.
+    -- replacement. Payloads signed under the old key stop verifying the moment
+    -- this contract is archived, because consumers can no longer read it. How a
+    -- consumer learns that rotation happened sits outside the standard.
     choice RotateKey : ContractId DistributorKeyPublication
       with
         newPublicKey : Text
-          -- ^ The distributor's new hex DER-SPKI secp256k1 public key.
       controller distributor
       do create this with publicKey = newPublicKey

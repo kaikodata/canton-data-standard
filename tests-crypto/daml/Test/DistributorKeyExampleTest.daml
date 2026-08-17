@@ -2,17 +2,14 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 -- | The example pair end to end: a distributor publishes a signing key, signs a
--- quote off-ledger, and a consumer verifies and settles on it inside its own choice.
+-- quote off-ledger, and a consumer verifies and settles on it inside its own
+-- choice. That is the pull flow in full — no verifier interface, and no
+-- alpha-crypto flag in the consumer's package.
 --
--- That is the pull flow in full. No verifier interface is involved: the only
--- on-ledger surface the distributor exposes is the `DistributorKey` view, the
--- verification is a library call in the consumer's own choice body, and the
--- consumer's package needs no alpha-crypto flag to make it.
---
--- The failure paths cover both sides of the split. The library's own messages
+-- The failure paths cover both sides of the split: the library's own messages
 -- (`"invalid signature"`, `"payload expired"`, `"unsupported payload codec"`)
--- propagate out of the consumer's choice unchanged, while the consumer's own
--- gates (`"untrusted distributor"`, `"feed mismatch"`, `"quote too stale"`) are
+-- propagate out of the consumer's choice unchanged, while
+-- `"untrusted distributor"`, `"feed mismatch"` and `"quote too stale"` are
 -- checks the standard leaves to the consumer by design.
 module Test.DistributorKeyExampleTest where
 

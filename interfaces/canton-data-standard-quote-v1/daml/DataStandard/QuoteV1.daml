@@ -1,57 +1,44 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | The price quote interface of the Data Standard. A distributor implements
--- `PublishedQuote` on its own template to publish a single typed price for a
--- named feed; a consumer reads it through the interface without depending on
--- the distributor's package.
+-- | The price quote interface. A distributor implements `PublishedQuote` on its
+-- own template to publish a single typed price for a named feed; a consumer
+-- reads it through the interface, without depending on the distributor's
+-- package.
 module DataStandard.QuoteV1 where
 
 import DataStandard.Utils (Metadata, Quote)
 
--- | The on-ledger view every `PublishedQuote` implementation exposes. A
--- consumer reads only these fields, and is therefore decoupled from the
--- template that produced them. The view is the envelope around a `Quote`: it
--- adds the provenance the quote itself omits (who published it, and when).
+-- | The view every `PublishedQuote` implementation exposes: a `Quote` plus the
+-- provenance the quote itself omits.
 data PublishedQuoteView = PublishedQuoteView with
     distributor : Party
       -- ^ The party that published the quote, and whom the consumer chooses to
-      -- trust as its source. A consumer trusts a (distributor, feedId) pair,
-      -- where the feed lives inside `quote`; switching distributor is
-      -- re-pointing it, with no recompile.
+      -- trust as its source. A consumer trusts a (distributor, feedId) pair;
+      -- switching distributor is re-pointing it, with no recompile.
     quote : Quote
-      -- ^ The economic content of the publication: the feed, its price, and the
-      -- market instant the price is observed for. It holds no provenance of its
-      -- own; that is the envelope's job.
+      -- ^ The economic content: the feed, its price, and the market instant the
+      -- price is observed for.
     publishedAt : Time
       -- ^ When the distributor produced the quote. Distinct from
-      -- `quote.priceTime` (a quote can be produced after the instant it prices)
-      -- and from the contract-creation time. Use it for staleness checks. It
-      -- means the same thing as `PublishedDataPoint.publishedAt`, so a
-      -- distributor implementing both interfaces sets the two identically.
+      -- `quote.priceTime`, since a quote can be produced after the instant it
+      -- prices, and from the contract-creation time. Consumers use it for
+      -- staleness checks.
     metadata : Metadata
-      -- ^ Additive annotations not part of the quote itself; see `Metadata`.
-      -- `emptyMetadata` when the distributor has nothing to attach.
+      -- ^ Additive annotations that are not part of the quote itself.
   deriving (Eq, Show)
 
--- | The price quote interface. A distributor implements it on its own template;
--- consumers read the view through it and never import the distributor's package,
--- so switching distributor is a configuration change and not a recompile.
---
--- `PublishedQuote` is independent and does not require
--- `DataStandard.DataPointV1`. A distributor that wants its publications to be
--- readable both as a typed quote and as a generic data point MAY implement both
--- interfaces on the same template, setting the shared fields (`distributor`,
--- `publishedAt`) identically across the two views.
+-- | The price quote interface. It is independent of
+-- `DataStandard.DataPointV1`: a distributor whose publications should be
+-- readable both ways implements both interfaces on one template, setting
+-- `distributor` and `publishedAt` identically across the two views.
 interface PublishedQuote where
   viewtype PublishedQuoteView
 
-  -- | Read the view from a contract the caller can see. This is the read path
-  -- for a party that is not a stakeholder of the contract: such a party
-  -- obtains the contract through explicit disclosure, which grants visibility
-  -- but not the authority to `fetch`, and so reads by exercising this choice,
-  -- which the caller alone authorises. The choice is nonconsuming, and what it
-  -- returns is the view, not the implementing template.
+  -- | Read the view from a contract the caller can see. A party holding the
+  -- contract by explicit disclosure is not a stakeholder and so cannot `fetch`
+  -- it; this choice is authorised by the caller alone, and returns the view
+  -- rather than the implementing template.
   nonconsuming choice PublishedQuote_Fetch : PublishedQuoteView
     with
       actor : Party

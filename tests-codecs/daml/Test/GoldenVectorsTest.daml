@@ -3,18 +3,14 @@
 
 -- | The normative golden vectors for the structural hash.
 --
--- Every literal in this module was produced by a separate Python implementation
--- written from the scheme definition alone, with no reference to this Daml code.
--- A green run is therefore evidence of the standard's central implementability
--- claim: a signer outside Daml, given only the written scheme, computes the same
--- hashes this library does.
+-- Every literal here was produced by a separate Python implementation written
+-- from the scheme definition alone, so a green run is evidence that a signer
+-- outside Daml computes the same hashes this library does. The vectors are
+-- normative: a mismatch means the Daml implementation is wrong, never that a
+-- vector should be adjusted.
 --
--- The vectors are normative. A mismatch means the Daml implementation is wrong,
--- and never that a vector should be adjusted.
---
--- The suite has no crypto dependency: the hashing surface uses the stable
--- `DA.Text.sha256`, so this package builds with no alpha-crypto flag. Part of
--- what the suite proves is simply that it compiles.
+-- The suite has no crypto dependency, so part of what it proves is that the
+-- hashing surface compiles with no alpha-crypto flag.
 module Test.GoldenVectorsTest where
 
 import DA.Assert ((===))
