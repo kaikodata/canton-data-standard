@@ -1,28 +1,16 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | A reference consumer for signature-based delivery: sign off-ledger, verify
--- in your own choice through the library, end to end.
+-- | A reference consumer for the pull path: verify-and-use in one transaction.
+-- The buyer supplies a payload the distributor signed off-ledger, the choice
+-- reads the distributor's published key, verifies the payload with
+-- `DataStandard.Codecs.Verify`, and settles at the verified price. A failed
+-- verification aborts the transaction, so no settlement can exist against an
+-- unverified price.
 --
--- The workflow is verify-and-use in a single transaction. The buyer supplies a
--- payload the distributor signed off-ledger, the choice reads the distributor's
--- published key through `DistributorKey_Fetch`, verifies the payload with
--- `DataStandard.Codecs.Verify`, and settles the trade at the verified price. A
--- failed verification aborts the whole transaction, so no settlement can exist
--- against an unverified price.
---
--- Two details of the arrangement are worth pointing out.
---
--- The verification runs in the consumer's own choice, and not in a choice on a
--- standard interface. Every validating participant still re-executes it, so it is
--- no less binding, and the code performing it lives in an upgradable utility
--- package, so a bug in it can be fixed.
---
--- This package does not set `-Wno-crypto-text-is-alpha`, and does not need to.
--- That flag is required to compile a module that imports the alpha
--- `DA.Crypto.Text`; calling a library function that imports it internally is an
--- ordinary function call. A consumer of the standard therefore inherits no
--- alpha-crypto flag of its own.
+-- This package does not set `-Wno-crypto-text-is-alpha` and does not need to:
+-- calling a library function that imports the alpha builtins internally is an
+-- ordinary function call.
 module DistributorKeyConsumer.Trading where
 
 import DA.Time (RelTime, subTime)
@@ -36,47 +24,38 @@ import DataStandard.Utils (SignedQuote)
 template SignedQuoteTradeOffer
   with
     seller : Party
-      -- ^ The party offering the trade; signs the offer.
     buyer : Party
       -- ^ The counterparty who accepts and supplies the signed quote.
     feedId : Text
-      -- ^ The feed the buyer expects the quote to be for. Checked against the
-      -- verified quote, because the standard authenticates the signer, not the
-      -- feed: one key signs every feed the distributor publishes.
+      -- ^ The feed the buyer expects. Checked against the verified quote,
+      -- because the standard authenticates the signer, not the feed: one key
+      -- signs every feed the distributor publishes.
     quantity : Decimal
-      -- ^ The amount of the feed's instrument to settle.
     expectedDistributor : Party
-      -- ^ The one distributor whose price the buyer accepts. Verification makes the
-      -- reported `distributor` authentic, but trusting that party is the consumer's
-      -- decision, so the buyer pins it here and the accept gates on it.
+      -- ^ The one distributor whose price the buyer accepts. Verification makes
+      -- the reported `distributor` authentic; trusting that party is the
+      -- consumer's decision.
     maxQuoteAge : RelTime
-      -- ^ The largest age, now minus `publishedAt`, the buyer will settle on. The
-      -- signed `expiresAt` is the standard's only replay bound; this is the
-      -- consumer's own tighter policy, applied on top of it.
+      -- ^ The largest age, now minus `publishedAt`, the buyer will settle on.
+      -- The signed `expiresAt` is the standard's only replay bound; this is the
+      -- consumer's tighter policy on top of it.
     keyCid : ContractId DistributorKey
-      -- ^ The distributor's published key, identified through the interface rather
-      -- than a concrete template. The buyer obtains it through explicit disclosure
-      -- when accepting.
+      -- ^ The distributor's published key, through the interface. The buyer
+      -- obtains it by explicit disclosure when accepting.
   where
     signatory seller
     observer buyer
 
-    -- | Settle the trade at the price of a distributor-signed quote, in the buyer's
-    -- transaction.
-    --
-    -- The key is read by exercising `DistributorKey_Fetch`, not by `fetch`:
-    -- disclosure grants visibility but not the authority a `fetch` needs, and the
-    -- buyer is not a stakeholder of the distributor's publication.
-    --
-    -- The gates run in this order: the key must belong to the pinned distributor,
-    -- the payload must verify (codec, validity window, signature, with the
-    -- library's messages propagating unchanged), the quote must be for the
-    -- expected feed, and it must be neither future-dated nor older than the
-    -- buyer's staleness policy.
+    -- | Settle at the price of a distributor-signed quote, in the buyer's
+    -- transaction. The key is read by exercising `DistributorKey_Fetch`, not by
+    -- `fetch`: disclosure grants visibility but not the authority a `fetch`
+    -- needs. The gates run in order: the key belongs to the pinned distributor,
+    -- the payload verifies (codec, window, signature, with the library's
+    -- messages propagating unchanged), the feed matches, and the quote is
+    -- neither future-dated nor beyond the buyer's staleness policy.
     choice AcceptSignedQuoteTrade : ContractId SignedQuoteTradeSettlement
       with
         payload : SignedQuote
-          -- ^ The off-ledger-signed quote the buyer materialized.
         signature : Text
           -- ^ The distributor's signature over the payload's structural hash.
       controller buyer
@@ -103,33 +82,25 @@ template SignedQuoteTradeOffer
               signature = v.signature
               publicKey = v.publicKey
 
-    -- | Withdraw the offer.
     choice CancelOffer : ()
       controller seller
       do pure ()
 
 -- | The record of a settled trade. It keeps the signed validity window and the
--- `canonicalHash`/`signature`/`publicKey` evidence beside the trade, so the trade
--- record alone is enough to re-verify the price off-ledger later, without the
--- distributor's package and without the key contract still being active.
---
--- Use `canonicalHash` as the durable join key for anything that must reference
--- this verification. A contract id will not do, because an archive-and-replace
--- refresh of the key publication changes it.
+-- `canonicalHash`/`signature`/`publicKey` evidence, so the trade record alone
+-- is enough to re-verify the price off-ledger later, without the distributor's
+-- package and without the key contract still being active. `canonicalHash` is
+-- the durable join key; a contract id is not, since rotation changes it.
 template SignedQuoteTradeSettlement
   with
     seller : Party
-      -- ^ The offering party.
     buyer : Party
-      -- ^ The accepting party, and the party that performed the verification.
+      -- ^ The accepting party, and the one that performed the verification.
     feedId : Text
-      -- ^ The settled feed.
     quantity : Decimal
-      -- ^ The settled quantity.
     price : Decimal
       -- ^ The verified price the trade settled at.
     totalAmount : Decimal
-      -- ^ `price * quantity`, recorded so the settled total needs no recompute.
     distributor : Party
       -- ^ The distributor whose signature authenticated the price.
     priceTime : Time
@@ -137,15 +108,13 @@ template SignedQuoteTradeSettlement
     publishedAt : Time
       -- ^ When the distributor produced the quote.
     verifiedAt : Time
-      -- ^ The ledger time the verification succeeded, distinct from `publishedAt`.
+      -- ^ The ledger time the verification succeeded.
     expiresAt : Time
-      -- ^ The signed expiry the verification checked; part of the hashed envelope,
-      -- so it is needed to reproduce the check.
+      -- ^ The signed expiry the verification checked; part of the hashed
+      -- envelope, so it is needed to reproduce the check.
     canonicalHash : Text
       -- ^ The structural root hash the signature committed to.
     signature : Text
-      -- ^ The distributor's verified signature, retained as evidence.
     publicKey : Text
-      -- ^ The key the signature verified against, retained as evidence.
   where
     signatory seller, buyer

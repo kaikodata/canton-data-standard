@@ -1,26 +1,20 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Shared value types for the Data Standard's payloads. Every Data Standard
--- interface package depends on this package, as do the applications that
--- implement or consume those interfaces.
+-- | Shared value types for the Data Standard's payloads. Every interface
+-- package depends on this one, as do the applications implementing or consuming
+-- those interfaces. It is data-only, so it can be smart-contract-upgraded.
 module DataStandard.Utils where
 
 import DA.TextMap (TextMap)
 import qualified DA.TextMap as TM
 
--- | The closed, recursive set of values that may appear in a `Values` payload.
--- The set is the scalars plus an ordered list and a string-keyed map, so a
--- value can nest other values and a structured payload such as an index's
--- constituents is expressible. Which constructors exist is decided by the Data
--- Standard; an individual distributor cannot add one.
---
--- Closing the set that way gives every value a single canonical hash, which is
--- what signature-based delivery relies on when it reconstructs a payload
--- on-ledger to check a distributor's signature. The
--- `canton-data-standard-codecs` package defines that hash. Contract-based
--- (push) delivery needs no hash at all, since the ledger serializes the
--- payload itself.
+-- | The closed, recursive set of values a `Values` payload may hold: the
+-- scalars plus an ordered list and a string-keyed map, so a structured payload
+-- such as an index's constituents is expressible. The standard decides which
+-- constructors exist; a distributor cannot add one. Closing the set gives every
+-- value a single canonical hash, which is what the pull path relies on when it
+-- reconstructs a payload on-ledger to check a signature.
 data AnyValue
   = AVInt Int
   | AVDecimal Decimal
@@ -31,20 +25,19 @@ data AnyValue
   | AVMap (TextMap AnyValue)
   deriving (Eq, Show)
 
--- | A data point's payload: a map from field name to tagged value. Which field
--- names a given feed is expected to have, and at which types, is defined by the
--- `schemaVersion` on the view that exposes the payload.
+-- | A data point's payload: a map from field name to tagged value. Which fields
+-- a feed carries, and at which types, is what the `schemaVersion` on the view
+-- exposing the payload identifies.
 type Values = TextMap AnyValue
 
--- | Conversion of a native Daml value into its `AnyValue` tag. An instance
--- exists for each type the closed set supports, which lets `insertField`
--- accept a native value without the caller naming a constructor.
+-- | Conversion of a native Daml value into its `AnyValue` tag, so `insertField`
+-- takes a native value without the caller naming a constructor.
 class ToAnyValue a where
   toAny : a -> AnyValue
 
--- | Recovery of a native Daml value from its `AnyValue` tag. Returns `None`
--- when the tag holds a different type, so a consumer asking for the wrong type
--- gets `None` instead of a silently coerced value.
+-- | Recovery of a native Daml value from its `AnyValue` tag. `None` when the
+-- tag holds a different type, so asking for the wrong type never silently
+-- coerces.
 class FromAnyValue a where
   fromAny : AnyValue -> Optional a
 
@@ -91,165 +84,118 @@ instance FromAnyValue a => FromAnyValue (TextMap a) where
   fromAny (AVMap m) = traverseTextMap fromAny m
   fromAny _         = None
 
--- | A single price for a named feed, observed at a market instant. This is the
--- economic content of a quote and no more than that. Provenance (who published
--- it, and when) is an envelope concern, and belongs to the view that wraps a
--- `Quote`, so the same `Quote` value can be reused across views without
--- dragging distribution metadata along with it.
+-- | A single price for a named feed, observed at a market instant: the economic
+-- content of a quote and no more. Provenance belongs to the view that wraps a
+-- `Quote`, so the same value can be reused across views.
 data Quote = Quote with
     feedId : Text
-      -- ^ The price feed this quote is for, for example "BTC/USD". A consumer
-      -- trusts a (distributor, feedId) pair; switching distributor is re-pointing
-      -- it, with no recompile.
+      -- ^ The price feed, for example "BTC/USD".
     price : Decimal
-      -- ^ The quoted price for the feed, as an exact base-10 fixed-point number.
+      -- ^ The quoted price, as an exact base-10 fixed-point number.
     priceTime : Time
-      -- ^ The economic "as of" instant: the market time the price is observed
-      -- for. This is the timestamp a consumer reasons about the price with. Set
-      -- it equal to the view's `publishedAt` for a feed with no distinct
+      -- ^ The "as of" instant: the market time the price is observed for. Set it
+      -- equal to the view's `publishedAt` for a feed with no distinct
       -- observation time.
   deriving (Eq, Show)
 
--- | The record a client reconstructs and hands to the library's `verifyQuote`.
--- It is the exact set of fields the distributor signed off-ledger: the quote plus
--- the validity window the signature commits to. The signature itself travels
--- beside it as a separate argument, because it is taken over the hash of these
--- fields and so cannot also cover itself.
+-- | The record a consumer reconstructs and hands to `verifyQuote`: exactly the
+-- fields the distributor signed off-ledger. The signature travels beside it,
+-- since it is taken over the hash of these fields and so cannot cover itself.
 --
--- The record lives in this data-only package, not in the codec library, for two
--- reasons: every distributor and consumer then names one shape for a signed
--- quote, and a template may store it. A utility package makes its types
--- unserializable; a data-only package does not.
+-- It lives in this data-only package rather than in the codec library so that
+-- every distributor and consumer names one shape for a signed quote, and so a
+-- template may store it: a utility package's types are not serializable.
 data SignedQuote = SignedQuote with
     publishedAt : Time
-      -- ^ When the distributor produced and signed the quote. Becomes the
-      -- `publishedAt` of the `VerifiedQuote`; carries the same meaning as
-      -- `PublishedQuoteView.publishedAt`. A consumer uses it for staleness checks.
+      -- ^ When the distributor produced and signed the quote. Same meaning as
+      -- `PublishedQuoteView.publishedAt`.
     expiresAt : Time
-      -- ^ The instant after which the payload is no longer accepted. Verification
-      -- rejects a payload presented strictly after this time; the boundary instant
-      -- itself is still accepted. This is the sole replay defence: a captured
-      -- (payload, signature) pair stops verifying once it lapses. Must be at or
-      -- after `publishedAt`, since a window that ends before it begins is never
-      -- live; verification rejects such a payload on "published after expiry"
-      -- before reading the time.
+      -- ^ The instant after which the payload is refused; the boundary instant
+      -- itself is still accepted. This is the standard's only replay defence: a
+      -- captured (payload, signature) pair stops verifying once it lapses. Must
+      -- be at or after `publishedAt`.
     quote : Quote
-      -- ^ The economic content: the feed, its price, and the market instant the
-      -- price is observed for. Identical in meaning to `PublishedQuoteView.quote`.
+      -- ^ The economic content, as in `PublishedQuoteView.quote`.
   deriving (Eq, Show)
 
--- | The record a client reconstructs and hands to the library's
--- `verifyDataPoint`. It is the exact set of fields the distributor signed
--- off-ledger: the data point's payload plus the validity window the signature
--- commits to. The signature travels beside it, for the same reason it does on
--- `SignedQuote`.
+-- | The record a consumer reconstructs and hands to `verifyDataPoint`: exactly
+-- the fields the distributor signed off-ledger, with the signature beside it,
+-- as on `SignedQuote`.
 data SignedDataPoint = SignedDataPoint with
     publishedAt : Time
-      -- ^ When the distributor produced and signed the data point. Becomes the
-      -- `publishedAt` of the `VerifiedDataPoint`; carries the same meaning as
-      -- `PublishedDataPointView.publishedAt`. A consumer uses it for staleness
-      -- checks.
+      -- ^ When the distributor produced and signed the data point. Same meaning
+      -- as `PublishedDataPointView.publishedAt`.
     expiresAt : Time
-      -- ^ The instant after which the payload is no longer accepted. Verification
-      -- rejects a payload presented strictly after this time; the boundary instant
-      -- itself is still accepted. This is the sole replay defence: a captured
-      -- (payload, signature) pair stops verifying once it lapses. Must be at or
-      -- after `publishedAt`, since a window that ends before it begins is never
-      -- live; verification rejects such a payload on "published after expiry"
-      -- before reading the time.
+      -- ^ The instant after which the payload is refused; the boundary instant
+      -- itself is still accepted. This is the standard's only replay defence: a
+      -- captured (payload, signature) pair stops verifying once it lapses. Must
+      -- be at or after `publishedAt`.
     schemaVersion : Text
-      -- ^ Version of the `values` schema, using semantic versioning. Identical in
-      -- meaning to `PublishedDataPointView.schemaVersion`: it describes a given
-      -- feed's payload and evolves per distributor, independently of this
-      -- package's version. Signed by the distributor and so committed to by the
-      -- signature.
+      -- ^ Semantic version of the `values` schema, as in
+      -- `PublishedDataPointView.schemaVersion`. Signed, so a replayer cannot
+      -- re-present authentic values under a different schema.
     values : Values
-      -- ^ The data point's payload, a map of field names to tagged values.
-      -- Identical in meaning to `PublishedDataPointView.values`. The recursive
-      -- part of the signed input; the structural hash walks it in a fixed
-      -- key-sorted order so the same payload always produces the same hash.
+      -- ^ The payload, as in `PublishedDataPointView.values`. The structural
+      -- hash walks it in key-sorted order, so the same payload always hashes
+      -- alike.
   deriving (Eq, Show)
 
--- | The in-memory result the library's `verifyQuote` returns on success. It has
--- no contract id of its own: a consumer uses the result directly in the same
--- transaction, and records whatever of it its own templates need. The leading
--- three fields are positionally and semantically aligned with
--- `PublishedQuoteView` (`distributor`, `publishedAt`, `quote`), so consumer code
--- reading a verified quote is identical to code reading a pushed one. The
--- trailing three are the evidence triple, retained so the verification can be
--- reproduced off-ledger.
+-- | What `verifyQuote` returns on success. It has no contract id: a consumer
+-- uses the result in the same transaction and records whatever its own
+-- templates need. The leading fields mirror `PublishedQuoteView`, so code
+-- reading a verified quote matches code reading a pushed one; the trailing
+-- three are the evidence needed to reproduce the check off-ledger.
 data VerifiedQuote = VerifiedQuote with
     distributor : Party
-      -- ^ The distributor whose key validated the signature, taken from the
-      -- `DistributorKey` view (or from the caller's pinned argument on the
-      -- `...With` overload). It is never read out of the payload, so a payload
-      -- cannot claim a distributor it was not signed by.
+      -- ^ The distributor whose key validated the signature, taken from the key
+      -- and never from the payload.
     publishedAt : Time
-      -- ^ Copied from the verified payload: when the distributor produced the
-      -- quote.
+      -- ^ From the verified payload.
     quote : Quote
-      -- ^ Copied from the verified payload: the authenticated economic content.
+      -- ^ The authenticated economic content.
     canonicalHash : Text
-      -- ^ The structural root hash of the signed payload, hex-encoded. This is
-      -- the digest the signature commits to; retained as evidence for off-ledger
-      -- re-verification, and the durable join key for anything that must
-      -- reference this verification.
+      -- ^ The structural root hash the signature committed to, hex-encoded.
+      -- Also the durable join key for anything referencing this verification.
     signature : Text
-      -- ^ The verified signature, hex-encoded DER ECDSA. Retained as evidence.
+      -- ^ The verified signature, hex-encoded DER ECDSA.
     publicKey : Text
-      -- ^ The public key the signature verified against. Retained as evidence so
-      -- re-verification needs nothing else.
+      -- ^ The key the signature verified against.
   deriving (Eq, Show)
 
--- | The in-memory result the library's `verifyDataPoint` returns on success. The
--- leading four fields are semantically aligned with `PublishedDataPointView`
--- (`distributor`, `publishedAt`, `schemaVersion`, `values`), so consumer code
--- reading a verified data point is identical to code reading a pushed one. There
--- is no `metadata` field, since metadata is an envelope annotation the
--- distributor does not sign and so cannot be authenticated; `VerifiedQuote`
--- drops it for the same reason. The trailing three are the evidence triple,
--- retained so the verification can be reproduced off-ledger.
+-- | What `verifyDataPoint` returns on success, mirroring
+-- `PublishedDataPointView` in the same way `VerifiedQuote` mirrors the quote
+-- view. There is no `metadata` field: metadata is an envelope annotation the
+-- distributor does not sign, and so cannot be authenticated.
 data VerifiedDataPoint = VerifiedDataPoint with
     distributor : Party
-      -- ^ The distributor whose key validated the signature, taken from the
-      -- `DistributorKey` view (or from the caller's pinned argument on the
-      -- `...With` overload). It is never read out of the payload, so a payload
-      -- cannot claim a distributor it was not signed by.
+      -- ^ The distributor whose key validated the signature, taken from the key
+      -- and never from the payload.
     publishedAt : Time
-      -- ^ Copied from the verified payload: when the distributor produced the
-      -- data point.
+      -- ^ From the verified payload.
     schemaVersion : Text
-      -- ^ Copied from the verified payload: the version of the authenticated
-      -- payload's schema.
+      -- ^ From the verified payload.
     values : Values
-      -- ^ Copied from the verified payload: the authenticated key/value payload.
+      -- ^ The authenticated key/value payload.
     canonicalHash : Text
-      -- ^ The structural root hash of the signed payload, hex-encoded. This is
-      -- the digest the signature commits to; retained as evidence for off-ledger
-      -- re-verification, and the durable join key for anything that must
-      -- reference this verification.
+      -- ^ The structural root hash the signature committed to, hex-encoded.
+      -- Also the durable join key for anything referencing this verification.
     signature : Text
-      -- ^ The verified signature, hex-encoded DER ECDSA. Retained as evidence.
+      -- ^ The verified signature, hex-encoded DER ECDSA.
     publicKey : Text
-      -- ^ The public key the signature verified against. Retained as evidence so
-      -- re-verification needs nothing else.
+      -- ^ The key the signature verified against.
   deriving (Eq, Show)
 
--- | Extensibility metadata, present on every Data Standard view.
---
--- Metadata is the channel for additive evolution: a producer attaches new
--- annotations as entries here instead of changing a view's shape, so a consumer
--- that does not recognise a key ignores it and is never broken by the
--- addition. Keys SHOULD be prefixed with the DNS name of the application that
--- defines them (for example, "exampleoracle.com/source"), following the
--- convention the Canton token standard uses for its own metadata. Entries
--- SHOULD be kept small, because on-ledger data is costly.
+-- | Extensibility metadata, present on every view. It is the channel for
+-- additive evolution: a distributor attaches new annotations as entries here
+-- instead of changing a view's shape, and a consumer ignores keys it does not
+-- recognise. Keys SHOULD be prefixed with the DNS name of the application
+-- defining them ("exampleoracle.com/source"), and entries SHOULD be kept small,
+-- because on-ledger data is costly.
 data Metadata = Metadata with
     values : TextMap Text
   deriving (Eq, Show)
 
--- | Metadata carrying no annotations; the conventional contents of a view's
--- `metadata` field when the distributor has nothing to attach.
+-- | Metadata carrying no annotations.
 emptyMetadata : Metadata
 emptyMetadata = Metadata with values = TM.empty
 
@@ -277,7 +223,7 @@ traverseTextMap f m =
 insertField : ToAnyValue v => Text -> v -> Values -> Values
 insertField key v = TM.insert key (toAny v)
 
--- | Read a field from a payload at its expected type. Returns `None` when the
--- field is absent or holds a different type.
+-- | Read a field from a payload at its expected type. `None` when the field is
+-- absent or holds a different type.
 lookupField : FromAnyValue v => Text -> Values -> Optional v
 lookupField key row = fromAny =<< TM.lookup key row

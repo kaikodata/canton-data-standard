@@ -4,12 +4,11 @@
 -- | The structural properties the signed hash relies on, as opposed to the pinned
 -- values in `Test.GoldenVectorsTest`.
 --
--- Three properties are load-bearing and each has a section here: the constructor
--- tags make the `AnyValue` hash injective across types, map entries hash in
--- code-point key order and never in insertion order, and the upgraded-record
--- combinators tolerate optional fields appended by a later version. A regression in
--- any of them is a signature-compatibility break, so each is asserted as a
--- property here instead of being left implied by the vectors.
+-- Three properties are load-bearing, one section each: the constructor tags make
+-- the `AnyValue` hash injective across types, map entries hash in code-point key
+-- order and never in insertion order, and the upgraded-record combinators
+-- tolerate optional fields appended by a later version. A regression in any of
+-- them is a signature-compatibility break.
 module Test.StructuralHashPropsTest where
 
 import DA.Assert ((===))

@@ -1,10 +1,8 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | A reference producer for the Data Standard. A distributor's obligation is
--- one thing, and this module is all of it: implement `PublishedDataPoint` on a
--- template the distributor signs. A consumer of the standard reads the result
--- without depending on this package.
+-- | A reference producer. A distributor's whole obligation is what this module
+-- does: implement `PublishedDataPoint` on a template it signs.
 module DataProducer.PriceOracle where
 
 import qualified DA.TextMap as TM
@@ -14,16 +12,14 @@ import DataStandard.Utils
 
 -- | A published asset-pair price.
 --
--- The template has no observers, on purpose. A reader that is not a stakeholder
--- obtains the contract through explicit disclosure and reads it by exercising
--- `PublishedDataPoint_Fetch`, so publishing costs the same whether one consumer
--- reads the price or a thousand do.
+-- No observers, on purpose: a reader that is not a stakeholder obtains the
+-- contract by explicit disclosure and reads it through
+-- `PublishedDataPoint_Fetch`, so publishing costs the same at any audience size.
 template PublishedPrice
   with
     oracle    : Party
       -- ^ The distributor; signs and owns the publication.
     assetPair : Text
-      -- ^ The feed this price is for, for example "BTC/USD".
     price     : Decimal
     at        : Time
       -- ^ When the price was produced.
@@ -42,14 +38,12 @@ template PublishedPrice
           values = TM.fromList [("exampleoracle.com/source", "reference-implementation")]
 
     -- | Publish a fresh price by archiving this contract and creating its
-    -- replacement. Archiving the old publication is what makes a consumer
-    -- holding its contract id fail fast instead of reading a stale price.
-    -- Revoking a feed is the same operation with no replacement created.
+    -- replacement, so a consumer holding the old contract id fails fast instead
+    -- of reading a stale price. Revocation is the same with no replacement.
     choice UpdatePrice : ContractId PublishedPrice
       with
         newPrice : Decimal
         newAt    : Time
-          -- ^ Must be later than the current `at`.
       controller oracle
       do
         assertMsg "publication time must increase" (newAt > at)

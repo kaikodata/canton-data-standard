@@ -1,11 +1,9 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | A reference consumer for the Data Standard's `PublishedQuote` interface. It
--- depends only on the interface package and names no producer's template.
--- Because the quote has a typed `price` and `feedId`, the consumer reads them
--- directly, and there is no payload-schema agreement to track alongside the
--- interface.
+-- | A reference consumer for `PublishedQuote`. It depends only on the interface
+-- package and names no distributor's template. The quote's `price` and `feedId`
+-- are typed fields on the view, so there is no payload schema to agree on.
 module QuoteConsumer.Trading where
 
 import DataStandard.QuoteV1
@@ -19,18 +17,14 @@ template QuoteTradeOffer
     seller   : Party
     buyer    : Party
     feedId   : Text
-      -- ^ The feed the buyer expects the quote to be for.
     quantity : Decimal
     expectedDistributor : Party
       -- ^ The one distributor whose price the buyer accepts. The standard makes
-      -- the quote's `distributor` authentic, but trusting that party is the
-      -- consumer's decision, so the buyer pins it here and the accept gates on
-      -- it. Which quote gets referenced is still the counterparty's choice; this
-      -- fixes only the distributor the buyer will settle on.
+      -- the quote's `distributor` authentic; trusting that party is the
+      -- consumer's decision, so the buyer pins it here.
     maxQuoteAge : RelTime
       -- ^ The largest age, now minus `publishedAt`, the buyer will settle on. A
-      -- pushed quote has no replay bound of its own, so this is the consumer's
-      -- own staleness policy.
+      -- pushed quote has no replay bound of its own.
     quoteCid : ContractId PublishedQuote
       -- ^ Any `PublishedQuote` publication, identified through the interface
       -- rather than a concrete template.
@@ -39,12 +33,8 @@ template QuoteTradeOffer
     observer buyer
 
     -- | Settle the trade at the quoted price, in the buyer's transaction. The
-    -- price is read through `PublishedQuote_Fetch`. Feed identity is the
-    -- consumer's job to confirm, since the standard authenticates only the
-    -- distributor. The buyer also gates the `distributor` against
-    -- `expectedDistributor` and bounds the age of `publishedAt` by
-    -- `maxQuoteAge`, so an untrusted distributor or a quote older than the
-    -- buyer's policy aborts before settlement.
+    -- standard authenticates the distributor and says nothing about feed
+    -- identity or recency, so the buyer gates on all three.
     choice AcceptQuoteTrade : ContractId QuoteTradeSettlement
       controller buyer
       do
@@ -62,14 +52,13 @@ template QuoteTradeOffer
           priceTime   = v.quote.priceTime
           publishedAt = v.publishedAt
 
-    -- | Withdraw the offer.
     choice CancelQuoteOffer : ()
       controller seller
       do pure ()
 
--- | The record of a settled trade, capturing which distributor's quote was
--- used, the market time it priced (`priceTime`), and when the distributor produced
--- it (`publishedAt`), so a later staleness review has both timestamps.
+-- | The record of a settled trade, keeping both timestamps — the market time
+-- the quote priced and when the distributor produced it — for a later staleness
+-- review.
 template QuoteTradeSettlement
   with
     seller      : Party

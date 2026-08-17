@@ -1,13 +1,11 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | The consumer side of the distributor-switching demonstration. It depends only
--- on the interface packages and names no producer's template, so it reads any
--- `PublishedQuote` or `PublishedDataPoint` implementation through the interface.
--- To switch distributor you re-point the trusted `(distributor, feedId)` pair the
--- consumer gates on, which arrives as offer data. Nothing is recompiled: the two
--- structurally different distributors in this demonstration are read by the same
--- compiled choices.
+-- | The consumer side of the switching demonstration. It depends only on the
+-- interface packages and names no distributor's template, so switching
+-- distributor is re-pointing the trusted `(distributor, feedId)` pair, which
+-- arrives as offer data. Nothing is recompiled: the two structurally different
+-- distributors in this demonstration are read by the same compiled choices.
 module SwitchingConsumer.Trading where
 
 import DataStandard.DataPointV1
@@ -15,18 +13,15 @@ import DataStandard.QuoteV1
 import DataStandard.Utils
 
 -- | An offer to trade `quantity` of `feedId` at the price the referenced quote
--- carries, settling only when that quote comes from the distributor the offer
--- trusts.
+-- carries, settling only when that quote comes from the trusted distributor.
 template QuoteSwitchOffer
   with
     seller              : Party
     buyer               : Party
     expectedDistributor : Party
-      -- ^ The one distributor whose quote the buyer accepts. Pointing this at a
-      -- different party is all there is to switching distributor; nothing else
-      -- changes and nothing is recompiled.
+      -- ^ The one distributor whose quote the buyer accepts. Pointing this at
+      -- another party is all there is to switching distributor.
     feedId              : Text
-      -- ^ The feed the buyer expects the quote to be for.
     quantity            : Decimal
     quoteCid            : ContractId PublishedQuote
       -- ^ Any `PublishedQuote` publication, identified through the interface
@@ -35,17 +30,10 @@ template QuoteSwitchOffer
     signatory seller
     observer buyer
 
-    -- | Settle the trade at the quoted price, in the buyer's transaction.
-    --
-    -- Switching from one distributor to another means passing a different
-    -- `expectedDistributor` to this same compiled choice. The gate below is the
-    -- only thing that distinguishes distributors, and it reads offer data, never
-    -- code. The two structurally different distributors in this demonstration,
-    -- one storing a price and one deriving a mid from a bid and an ask, both
-    -- settle here without a single Daml change, because each exposes the same
-    -- `PublishedQuote` view. The standard authenticates the distributor; the
-    -- consumer confirms the feed. A production consumer would also bound the age
-    -- of `publishedAt`.
+    -- | Settle the trade at the quoted price, in the buyer's transaction. The
+    -- distributor gate below reads offer data, never code, which is why both
+    -- distributors in this demonstration settle here without a Daml change. A
+    -- production consumer would also bound the age of `publishedAt`.
     choice AcceptQuoteSwitch : ContractId QuoteSwitchSettlement
       controller buyer
       do
@@ -60,24 +48,18 @@ template QuoteSwitchOffer
           priceTime   = v.quote.priceTime
           publishedAt = v.publishedAt
 
-    -- | Withdraw the offer.
     choice CancelQuoteSwitchOffer : ()
       controller seller
       do pure ()
 
--- | An offer to trade `quantity` of `assetPair` at the price the referenced
--- data point carries, settling only when that data point comes from the
--- distributor the offer trusts. The generic-payload counterpart of
--- `QuoteSwitchOffer`.
+-- | The generic-payload counterpart of `QuoteSwitchOffer`.
 template DataPointSwitchOffer
   with
     seller              : Party
     buyer               : Party
     expectedDistributor : Party
-      -- ^ The one distributor whose data the buyer accepts. Pointing this at a
-      -- different party is all there is to switching distributor.
+      -- ^ The one distributor whose data the buyer accepts.
     assetPair           : Text
-      -- ^ The feed the buyer expects the data point to be for.
     quantity            : Decimal
     dataCid             : ContractId PublishedDataPoint
       -- ^ Any `PublishedDataPoint` publication, identified through the interface
@@ -86,11 +68,9 @@ template DataPointSwitchOffer
     signatory seller
     observer buyer
 
-    -- | Settle the trade at the published price, in the buyer's transaction.
-    -- Reads `assetPair` and `price` from the payload and ignores every other
-    -- field, so the market-maker distributor's extra `bid`/`ask` keys are
-    -- harmless. The distributor gate is the switch point, exactly as in
-    -- `AcceptQuoteSwitch`.
+    -- | Settle the trade at the published price. It reads `assetPair` and
+    -- `price` and ignores every other field, so the market maker's extra
+    -- `bid`/`ask` keys are harmless.
     choice AcceptDataPointSwitch : ContractId DataPointSwitchSettlement
       controller buyer
       do
@@ -105,43 +85,33 @@ template DataPointSwitchOffer
           distributor = v.distributor
           priceAt     = v.publishedAt
 
-    -- | Withdraw the offer.
     choice CancelDataPointSwitchOffer : ()
       controller seller
       do pure ()
 
--- | An offer to trade `quantity` of `feedId` only when two independent
--- distributors agree on the price within `tolerance`, settling at the average
--- of the two. The trust here is placed in a set of distributors instead of one:
--- N-of-M agreement, at N = M = 2.
+-- | An offer that settles only when two independent distributors agree on the
+-- price within `tolerance`, at the average of the two: trust placed in a set of
+-- distributors instead of one, at N = M = 2.
 template CrossCheckOffer
   with
     seller               : Party
     buyer                : Party
     expectedDistributorA : Party
-      -- ^ The distributor the buyer trusts for the first quote.
     expectedDistributorB : Party
-      -- ^ The distributor the buyer trusts for the second quote.
     feedId               : Text
-      -- ^ The feed both quotes are expected to be for.
     quantity             : Decimal
     tolerance            : Decimal
-      -- ^ The largest absolute price difference between the two distributors the
-      -- buyer will still settle on.
+      -- ^ The largest price difference between the two distributors the buyer
+      -- will still settle on.
     quoteCidA            : ContractId PublishedQuote
-      -- ^ The first distributor's quote, through the interface.
     quoteCidB            : ContractId PublishedQuote
-      -- ^ The second distributor's quote, through the interface.
   where
     signatory seller
     observer buyer
 
-    -- | Settle only when both trusted distributors agree within `tolerance`,
-    -- pricing the trade at the average of the two. Each quote is gated against
-    -- its own expected distributor and the shared feed; the standard
-    -- authenticates each distributor independently. Switching either distributor
-    -- is re-pointing its `expectedDistributor`, just as in the single-distributor
-    -- offers.
+    -- | Settle only when both trusted distributors agree within `tolerance`.
+    -- Each quote is gated against its own expected distributor and the shared
+    -- feed; the standard authenticates each distributor independently.
     choice AcceptCrossCheck : ContractId CrossCheckSettlement
       controller buyer
       do
@@ -163,15 +133,11 @@ template CrossCheckOffer
           publishedAtA = vA.publishedAt
           publishedAtB = vB.publishedAt
 
-    -- | Withdraw the offer.
     choice CancelCrossCheckOffer : ()
       controller seller
       do pure ()
 
--- | The record of a trade settled off a single distributor's quote, capturing
--- which distributor was used, the market time it priced (`priceTime`), and when
--- the distributor produced it (`publishedAt`), so a later staleness review has
--- both timestamps.
+-- | The record of a trade settled off a single distributor's quote.
 template QuoteSwitchSettlement
   with
     seller      : Party
@@ -186,8 +152,7 @@ template QuoteSwitchSettlement
   where
     signatory seller, buyer
 
--- | The record of a trade settled off a single distributor's data point,
--- capturing which distributor's price was used and when it was produced.
+-- | The record of a trade settled off a single distributor's data point.
 template DataPointSwitchSettlement
   with
     seller      : Party
@@ -202,8 +167,7 @@ template DataPointSwitchSettlement
     signatory seller, buyer
 
 -- | The record of a trade settled off two distributors that agreed within
--- tolerance, capturing both distributors and when each produced its quote, so a
--- later review can see the cross-check that gated the settlement.
+-- tolerance, capturing both and when each produced its quote.
 template CrossCheckSettlement
   with
     seller       : Party
@@ -219,7 +183,7 @@ template CrossCheckSettlement
   where
     signatory seller, buyer
 
--- | Read a field the consumer relies on, aborting with a descriptive message
--- when it is absent or has an unexpected type.
+-- | Read a field the consumer relies on, aborting when it is absent or has an
+-- unexpected type.
 required : Text -> Optional a -> Update a
 required field = optional (abort ("published data missing field: " <> field)) pure

@@ -5,10 +5,8 @@
 -- disclosure-gated `DistributorKey_Fetch` choice, and key rotation.
 --
 -- The interface publishes a key and does nothing else with it, so these tests
--- verify no signatures at all. Signature checking is library code, exercised in
--- `tests-crypto`. Keeping the interface's own tests crypto-free is what allows
--- this suite's DAR to run against a live ledger, where the Daml Script crypto
--- helpers are unavailable.
+-- verify no signatures; that is library code, exercised in `tests-crypto`.
+-- Staying crypto-free is what lets this suite's DAR run against a live ledger.
 module Test.DistributorKeyV1Test where
 
 import DA.Assert ((===))
