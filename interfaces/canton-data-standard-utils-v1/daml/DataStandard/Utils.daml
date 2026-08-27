@@ -9,6 +9,8 @@ module DataStandard.Utils where
 import DA.TextMap (TextMap)
 import qualified DA.TextMap as TM
 
+-- REIVEW(SM): the comment from https://github.com/kaikodata/canton-data-standard/pull/11/changes#r3860088698 still stands.
+
 -- | The closed, recursive set of values a `Values` payload may hold: the
 -- scalars plus an ordered list and a string-keyed map, so a structured payload
 -- such as an index's constituents is expressible. The standard decides which
@@ -195,9 +197,16 @@ data Metadata = Metadata with
     values : TextMap Text
   deriving (Eq, Show)
 
+
 -- | Metadata carrying no annotations.
 emptyMetadata : Metadata
 emptyMetadata = Metadata with values = TM.empty
+
+
+-- REVIEW(SM): this is referenced from interface definitions, which can't be upgraded. Move code out of this package.
+-- Also consider either dropping it by defining the datatypes in a base interface package and importing that
+-- (as done in token standard with the metadata types and the allocation type [defined in allocation and used in allocation-instruction and allocation-request)
+-- or alternatively make this a `canton-data-standard-types-v1` package and have the interface packages depend on it.
 
 -- | Turn a list of `Optional` into an `Optional` list, yielding `None` if any element is `None`.
 sequenceOptional : [Optional a] -> Optional [a]
