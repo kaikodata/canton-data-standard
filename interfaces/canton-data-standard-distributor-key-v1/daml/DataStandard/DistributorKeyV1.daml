@@ -39,6 +39,54 @@ data DistributorKeyView = DistributorKeyView with
       -- their own ids on this field.
   deriving (Eq, Show)
 
+-- REVIEW(SM): why do we need the key to be explicit? Can't we keep the verification
+-- method internal to the implementation of the interface of a `DatapointProvider`?
+--
+-- For interfaces less is more. From a consumption perspective, we'd ideally have
+-- a single interface for the on-ledger and the off-ledger distribution path, with a single read choice.
+--
+-- I believe we can achieve this along the following lines:
+
+
+interface DatapointProvider where
+  viewtype DatapointProviderView
+
+  nonconsuming choice DatapointProvider_Decode : DatapointView
+    with
+      encodedDatapoint : EncodedDatapoint
+      actor : Party
+    controller actor
+    do pure (view this)
+
+data EncodedDatapoint = EncodedDatapoint with
+    encodedValues : TextMap AnyValue
+      -- ^ Distributor chosen encoding.
+  deriving (Eq, Show)
+
+data DatapointView = DatapointView with
+    distributor : Party
+      -- ^ The party that published the data, and whom the consumer chooses to
+      -- trust as its source.
+    publishedAt : Time
+      -- ^ When the distributor produced the data, which is not necessarily when
+      -- the contract was created.
+    schemaVersion : Text
+      -- ^ Semantic version of the `values` schema. It describes a given feed's
+      -- payload and evolves per distributor, independently of the interface
+      -- version in this package's name.
+    values : Values
+      -- ^ The payload, as a map of field names to tagged values.
+    metadata : Metadata
+      -- ^ Additive annotations that are not part of the data itself.
+  deriving (Eq, Show)
+
+-- | Uniform type to represent a datapoint on-ledger that works with both the on-ledger and off-ledger distribution path.
+--
+-- On-ledger published datapoints use `EncodedDatapoint TextMap.empty`
+type Datapoint = (ContractId DatapointProvider, EncodedDatapoint)
+
+
+
 -- | The signing-key publication interface. Key rotation is instance
 -- replacement, through a choice on the distributor's own template: rotation
 -- policy belongs to the distributor, so the interface defines none.

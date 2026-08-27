@@ -100,6 +100,14 @@ data Quote = Quote with
       -- observation time.
   deriving (Eq, Show)
 
+
+-- REVIEW(SM): why do we need a separate type for Quotes? It seems that there's a
+-- straightforward encoding into a datapoint. I'd still define a type for it
+-- to make it easy to work with quotes, but I'd only define that in the utility
+-- package provided to implementors, but not as part of the code that defines the interfaces.
+
+
+
 -- | The record a consumer reconstructs and hands to `verifyQuote`: exactly the
 -- fields the distributor signed off-ledger. The signature travels beside it,
 -- since it is taken over the hash of these fields and so cannot cover itself.
