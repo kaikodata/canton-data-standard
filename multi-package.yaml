@@ -7,7 +7,6 @@
 packages:
 - ./interfaces/canton-data-standard-utils-v1
 - ./interfaces/canton-data-standard-datapoint-v1
-- ./interfaces/canton-data-standard-quote-v1
 - ./interfaces/canton-data-standard-distributor-key-v1
 - ./interfaces/canton-data-standard-codecs
 - ./examples/datapoint-producer
@@ -19,6 +18,7 @@ packages:
 - ./examples/switching-consumer
 - ./examples/distributor-key-producer
 - ./examples/distributor-key-consumer
+- ./tests-fixtures
 - ./tests
 - ./tests-codecs
 - ./tests-crypto

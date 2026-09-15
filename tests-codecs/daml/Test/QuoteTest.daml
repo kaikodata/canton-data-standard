@@ -3,22 +3,25 @@
 
 -- | The `Quote` to `Values` codec in both directions: that the round trip is
 -- lossless, and that the strict decode rejects every payload that is not exactly a
--- quote.
+-- quote. Also the envelope helpers built on it, which are how a quote reaches the
+-- signed data point path without an envelope of its own.
 --
 -- The negative half is all about that strictness. A lenient decode that ignored
 -- an unrecognised field would let two different payloads decode to the same
 -- quote, which for a signed payload means a signature over one payload appearing
 -- to authenticate another.
-module Test.QuoteValuesTest where
+module Test.QuoteTest where
 
 import DA.Assert ((===))
 import qualified DA.TextMap as TM
 import DA.Time (addRelTime, milliseconds)
 import Daml.Script
 
-import DataStandard.Codecs.QuoteValues (quoteToValues, valuesToQuote)
+import DataStandard.Codecs.Quote
+  ( Quote(..), quoteSchemaVersion, quoteToValues, signedQuote, valuesToQuote
+  , verifiedQuote )
 import DataStandard.Codecs.StructuralHash (epoch)
-import DataStandard.Utils (AnyValue(..), Quote(..), Values)
+import DataStandard.Utils (AnyValue(..), Values, VerifiedDataPoint(..))
 
 sampleQuote : Quote
 sampleQuote = Quote with
@@ -80,3 +83,34 @@ testUnknownFieldRejected = do
 testEmptyValuesRejected : Script ()
 testEmptyValuesRejected =
   valuesToQuote TM.empty === Left "missing field: feedId"
+
+-- | The signing-side helper puts the quote on the ordinary data point envelope:
+-- the quote schema, the encoded payload, and the window it is handed.
+testSignedQuoteIsADataPoint : Script ()
+testSignedQuoteIsADataPoint = do
+  let expiresAt = addRelTime sampleQuote.priceTime (milliseconds 3600000)
+      payload = signedQuote sampleQuote.priceTime expiresAt sampleQuote
+  payload.publishedAt === sampleQuote.priceTime
+  payload.expiresAt === expiresAt
+  payload.schemaVersion === quoteSchemaVersion
+  payload.values === quoteToValues sampleQuote
+
+-- | The consuming-side helper decodes an authenticated payload back to a quote,
+-- and refuses one published under any other schema — so a verified payload that
+-- is not a quote cannot be read as one.
+testVerifiedQuoteChecksSchema : Script ()
+testVerifiedQuoteChecksSchema = do
+  distributor <- allocateParty "Distributor"
+  let verified = VerifiedDataPoint with
+        distributor
+        publishedAt = sampleQuote.priceTime
+        schemaVersion = quoteSchemaVersion
+        values = quoteToValues sampleQuote
+        canonicalHash = "00"
+        signature = "00"
+        publicKey = "00"
+  verifiedQuote verified === Right sampleQuote
+  verifiedQuote (verified with schemaVersion = "1.0.0")
+    === Left "unexpected schema version: 1.0.0"
+  verifiedQuote (verified with values = TM.delete "price" verified.values)
+    === Left "missing field: price"

@@ -4,9 +4,9 @@
 -- | The distributor-switching demonstration: one consumer reads the same feed
 -- from two structurally different distributors with no Daml change. The direct
 -- distributor stores a price; the market-maker distributor stores a bid and an ask
--- and derives the mid. Both expose the identical interface views, so the same
--- compiled consumer choices settle against either, and switching distributor
--- amounts to passing a different `expectedDistributor`.
+-- and derives the mid. Both publish the same `assetPair`/`price` keys through the
+-- one interface, so the same compiled consumer choices settle against either, and
+-- switching distributor amounts to passing a different `expectedDistributor`.
 module Test.SwitchingDemoTest where
 
 import DA.Assert ((===))
@@ -16,15 +16,17 @@ import SwitchingConsumer.Trading
 import SwitchingDistributorDirect.Oracle
 import SwitchingDistributorMarketMaker.Oracle
 import DataStandard.DataPointV1 (PublishedDataPoint)
-import DataStandard.QuoteV1 (PublishedQuote)
 import DataStandard.Utils (emptyMetadata)
 import Test.Fixtures
+import Test.Templates
 
 -- | Both distributors publish the same feed at the same price (the market maker's
--- bid/ask straddle it), and the one `QuoteSwitchOffer` choice settles against
--- each in turn. All that changes between the two is `expectedDistributor`.
-testQuoteSwitchAcrossDistributors : Script ()
-testQuoteSwitchAcrossDistributors = do
+-- bid/ask straddle it), and the one `DataPointSwitchOffer` choice settles against
+-- each in turn. All that changes between the two is `expectedDistributor`. The
+-- market maker's view carries extra `bid`/`ask` fields, which a consumer reading
+-- only `assetPair` and `price` ignores.
+testSwitchAcrossDistributors : Script ()
+testSwitchAcrossDistributors = do
   oracleDirect <- allocateParty "OracleDirect"
   oracleMM     <- allocateParty "OracleMarketMaker"
   seller       <- allocateParty "Seller"
@@ -32,54 +34,13 @@ testQuoteSwitchAcrossDistributors = do
   now          <- getTime
 
   directCid <- submit oracleDirect $ createCmd DirectQuote with
-    oracle = oracleDirect, feedId = "BTC/USD", assetPair = "BTC/USD"
-    price = 65000.0, priceTime = now, publishedAt = now
+    oracle = oracleDirect, assetPair = "BTC/USD"
+    price = 65000.0, publishedAt = now
   mmCid <- submit oracleMM $ createCmd MarketMakerQuote with
-    oracle = oracleMM, feedId = "BTC/USD", assetPair = "BTC/USD"
-    bid = 64999.0, ask = 65001.0, priceTime = now, publishedAt = now
+    oracle = oracleMM, assetPair = "BTC/USD"
+    bid = 64999.0, ask = 65001.0, publishedAt = now
 
   -- The same consumer choice handles the direct distributor ...
-  directOfferCid <- submit seller $ createCmd QuoteSwitchOffer with
-    seller, buyer, expectedDistributor = oracleDirect, feedId = "BTC/USD"
-    quantity = 0.5
-    quoteCid = toInterfaceContractId @PublishedQuote directCid
-  Some directDisc <- queryDisclosure oracleDirect directCid
-  directSettleCid <- submit (actAs buyer <> disclose directDisc) $
-    exerciseCmd directOfferCid AcceptQuoteSwitch
-  Some directSettle <- queryContractId buyer directSettleCid
-  directSettle.price       === 65000.0
-  directSettle.distributor === oracleDirect
-
-  -- ... and the market maker, unchanged.
-  mmOfferCid <- submit seller $ createCmd QuoteSwitchOffer with
-    seller, buyer, expectedDistributor = oracleMM, feedId = "BTC/USD"
-    quantity = 0.5
-    quoteCid = toInterfaceContractId @PublishedQuote mmCid
-  Some mmDisc <- queryDisclosure oracleMM mmCid
-  mmSettleCid <- submit (actAs buyer <> disclose mmDisc) $
-    exerciseCmd mmOfferCid AcceptQuoteSwitch
-  Some mmSettle <- queryContractId buyer mmSettleCid
-  mmSettle.price       === 65000.0
-  mmSettle.distributor === oracleMM
-
--- | The same switch over the generic data point path. The market maker's view
--- carries extra `bid`/`ask` fields, which a consumer reading only `assetPair`
--- and `price` ignores, so both distributors settle identically.
-testDataPointSwitchAcrossDistributors : Script ()
-testDataPointSwitchAcrossDistributors = do
-  oracleDirect <- allocateParty "OracleDirect"
-  oracleMM     <- allocateParty "OracleMarketMaker"
-  seller       <- allocateParty "Seller"
-  buyer        <- allocateParty "Buyer"
-  now          <- getTime
-
-  directCid <- submit oracleDirect $ createCmd DirectQuote with
-    oracle = oracleDirect, feedId = "BTC/USD", assetPair = "BTC/USD"
-    price = 65000.0, priceTime = now, publishedAt = now
-  mmCid <- submit oracleMM $ createCmd MarketMakerQuote with
-    oracle = oracleMM, feedId = "BTC/USD", assetPair = "BTC/USD"
-    bid = 64999.0, ask = 65001.0, priceTime = now, publishedAt = now
-
   directOfferCid <- submit seller $ createCmd DataPointSwitchOffer with
     seller, buyer, expectedDistributor = oracleDirect, assetPair = "BTC/USD"
     quantity = 0.5
@@ -91,6 +52,7 @@ testDataPointSwitchAcrossDistributors = do
   directSettle.price       === 65000.0
   directSettle.distributor === oracleDirect
 
+  -- ... and the market maker, unchanged.
   mmOfferCid <- submit seller $ createCmd DataPointSwitchOffer with
     seller, buyer, expectedDistributor = oracleMM, assetPair = "BTC/USD"
     quantity = 0.5
@@ -102,9 +64,9 @@ testDataPointSwitchAcrossDistributors = do
   mmSettle.price       === 65000.0
   mmSettle.distributor === oracleMM
 
--- | An offer that trusts `oracleDirect` but is handed the market maker's quote
--- aborts. The standard authenticates the distributor; the consumer gates on the
--- one it trusts.
+-- | An offer that trusts `oracleDirect` but is handed the market maker's
+-- publication aborts. The standard authenticates the distributor; the consumer
+-- gates on the one it trusts.
 testRejectsUntrustedDistributor : Script ()
 testRejectsUntrustedDistributor = do
   oracleDirect <- allocateParty "OracleDirect"
@@ -114,21 +76,21 @@ testRejectsUntrustedDistributor = do
   now          <- getTime
 
   mmCid <- submit oracleMM $ createCmd MarketMakerQuote with
-    oracle = oracleMM, feedId = "BTC/USD", assetPair = "BTC/USD"
-    bid = 64999.0, ask = 65001.0, priceTime = now, publishedAt = now
-  offerCid <- submit seller $ createCmd QuoteSwitchOffer with
-    seller, buyer, expectedDistributor = oracleDirect, feedId = "BTC/USD"
+    oracle = oracleMM, assetPair = "BTC/USD"
+    bid = 64999.0, ask = 65001.0, publishedAt = now
+  offerCid <- submit seller $ createCmd DataPointSwitchOffer with
+    seller, buyer, expectedDistributor = oracleDirect, assetPair = "BTC/USD"
     quantity = 0.5
-    quoteCid = toInterfaceContractId @PublishedQuote mmCid
+    dataCid = toInterfaceContractId @PublishedDataPoint mmCid
   Some disc <- queryDisclosure oracleMM mmCid
-  submitFailsWith buyer disc (exerciseCmd offerCid AcceptQuoteSwitch)
+  submitFailsWith buyer disc (exerciseCmd offerCid AcceptDataPointSwitch)
     "untrusted distributor"
 
 -- | A trusted distributor publishing a schema without an `assetPair` field
--- aborts the data point path on the missing field. `TestFeed` is a valid
--- `PublishedDataPoint` implementation carrying `feedId`/`rate`, not `assetPair`.
-testDataPointSwitchRejectsForeignSchema : Script ()
-testDataPointSwitchRejectsForeignSchema = do
+-- aborts on the missing field. `TestFeed` is a valid `PublishedDataPoint`
+-- implementation carrying `feedId`/`rate`, not `assetPair`.
+testSwitchRejectsForeignSchema : Script ()
+testSwitchRejectsForeignSchema = do
   oracle <- allocateParty "OracleDirect"
   seller <- allocateParty "Seller"
   buyer  <- allocateParty "Buyer"
@@ -156,19 +118,19 @@ testCrossCheckSettlesWhenDistributorsAgree = do
   now          <- getTime
 
   directCid <- submit oracleDirect $ createCmd DirectQuote with
-    oracle = oracleDirect, feedId = "BTC/USD", assetPair = "BTC/USD"
-    price = 65000.0, priceTime = now, publishedAt = now
+    oracle = oracleDirect, assetPair = "BTC/USD"
+    price = 65000.0, publishedAt = now
   -- Mid of 64998/65006 is 65002, ten dollars above the direct distributor.
   mmCid <- submit oracleMM $ createCmd MarketMakerQuote with
-    oracle = oracleMM, feedId = "BTC/USD", assetPair = "BTC/USD"
-    bid = 64998.0, ask = 65006.0, priceTime = now, publishedAt = now
+    oracle = oracleMM, assetPair = "BTC/USD"
+    bid = 64998.0, ask = 65006.0, publishedAt = now
 
   offerCid <- submit seller $ createCmd CrossCheckOffer with
     seller, buyer
     expectedDistributorA = oracleDirect, expectedDistributorB = oracleMM
-    feedId = "BTC/USD", quantity = 0.5, tolerance = 50.0
-    quoteCidA = toInterfaceContractId @PublishedQuote directCid
-    quoteCidB = toInterfaceContractId @PublishedQuote mmCid
+    assetPair = "BTC/USD", quantity = 0.5, tolerance = 50.0
+    dataCidA = toInterfaceContractId @PublishedDataPoint directCid
+    dataCidB = toInterfaceContractId @PublishedDataPoint mmCid
   Some discA <- queryDisclosure oracleDirect directCid
   Some discB <- queryDisclosure oracleMM mmCid
   settleCid <- submit (actAs buyer <> disclose discA <> disclose discB) $
@@ -189,19 +151,19 @@ testCrossCheckRejectsWhenDistributorsDisagree = do
   now          <- getTime
 
   directCid <- submit oracleDirect $ createCmd DirectQuote with
-    oracle = oracleDirect, feedId = "BTC/USD", assetPair = "BTC/USD"
-    price = 65000.0, priceTime = now, publishedAt = now
+    oracle = oracleDirect, assetPair = "BTC/USD"
+    price = 65000.0, publishedAt = now
   -- Mid of 69999/70001 is 70000, five thousand above the direct distributor.
   mmCid <- submit oracleMM $ createCmd MarketMakerQuote with
-    oracle = oracleMM, feedId = "BTC/USD", assetPair = "BTC/USD"
-    bid = 69999.0, ask = 70001.0, priceTime = now, publishedAt = now
+    oracle = oracleMM, assetPair = "BTC/USD"
+    bid = 69999.0, ask = 70001.0, publishedAt = now
 
   offerCid <- submit seller $ createCmd CrossCheckOffer with
     seller, buyer
     expectedDistributorA = oracleDirect, expectedDistributorB = oracleMM
-    feedId = "BTC/USD", quantity = 0.5, tolerance = 50.0
-    quoteCidA = toInterfaceContractId @PublishedQuote directCid
-    quoteCidB = toInterfaceContractId @PublishedQuote mmCid
+    assetPair = "BTC/USD", quantity = 0.5, tolerance = 50.0
+    dataCidA = toInterfaceContractId @PublishedDataPoint directCid
+    dataCidB = toInterfaceContractId @PublishedDataPoint mmCid
   Some discA <- queryDisclosure oracleDirect directCid
   Some discB <- queryDisclosure oracleMM mmCid
   expectAbort

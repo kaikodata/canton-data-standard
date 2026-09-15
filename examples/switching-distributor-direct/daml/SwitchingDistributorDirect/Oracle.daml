@@ -2,17 +2,16 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 -- | A reference distributor for the switching demonstration: the ordinary
--- oracle shape. It stores a price directly and implements both `PublishedQuote`
--- and `PublishedDataPoint` on one template. The structurally different
--- `SwitchingDistributorMarketMaker.Oracle` exposes the identical views from a
+-- oracle shape. It stores a price directly and publishes it as a
+-- `PublishedDataPoint`. The structurally different
+-- `SwitchingDistributorMarketMaker.Oracle` exposes the identical view from a
 -- different internal representation, and a consumer reading through the
--- interfaces cannot tell the two apart.
+-- interface cannot tell the two apart.
 module SwitchingDistributorDirect.Oracle where
 
 import qualified DA.TextMap as TM
 
 import DataStandard.DataPointV1
-import DataStandard.QuoteV1
 import DataStandard.Utils
 
 -- | A published price for a single feed, stored directly. No observers: a
@@ -22,30 +21,13 @@ template DirectQuote
   with
     oracle      : Party
       -- ^ The distributor; signs and owns the publication.
-    feedId      : Text
-      -- ^ The feed, as named by the typed view.
     assetPair   : Text
-      -- ^ The same feed under the key the generic payload uses. Held separately
-      -- so each view can name the feed by its own convention; a distributor
-      -- serving one feed sets them equal.
+      -- ^ The feed, under the key the payload uses.
     price       : Decimal
-    priceTime   : Time
-      -- ^ The market time the price is observed for.
     publishedAt : Time
       -- ^ When the quote was produced.
   where
     signatory oracle
-
-    interface instance PublishedQuote for DirectQuote where
-      view = PublishedQuoteView with
-        distributor = oracle
-        quote = Quote with
-          feedId
-          price
-          priceTime
-        publishedAt
-        metadata    = Metadata with
-          values = TM.fromList [("exampleoracle.com/source", "reference-implementation")]
 
     interface instance PublishedDataPoint for DirectQuote where
       view = PublishedDataPointView with
@@ -63,12 +45,10 @@ template DirectQuote
     choice UpdateDirectQuote : ContractId DirectQuote
       with
         newPrice       : Decimal
-        newPriceTime   : Time
         newPublishedAt : Time
       controller oracle
       do
         assertMsg "publication time must increase" (newPublishedAt > publishedAt)
         create this with
           price       = newPrice
-          priceTime   = newPriceTime
           publishedAt = newPublishedAt

@@ -18,10 +18,10 @@ import qualified DA.TextMap as TM
 import DA.Time (addRelTime, milliseconds)
 import Daml.Script
 
-import DataStandard.Codecs.Envelope (hashSignedDataPoint, hashSignedQuote)
-import DataStandard.Codecs.QuoteValues (quoteToValues)
+import DataStandard.Codecs.Envelope (hashSignedDataPoint)
+import DataStandard.Codecs.Quote (Quote(..), quoteSchemaVersion, signedQuote)
 import DataStandard.Codecs.StructuralHash (Hashable(hash), epoch, timeToMillis)
-import DataStandard.Utils (AnyValue(..), Quote(..), SignedDataPoint(..), SignedQuote(..))
+import DataStandard.Utils (AnyValue(..), SignedDataPoint(..))
 
 -- | 2026-01-15T12:30:45Z, the envelope vectors' publication instant. Built from
 -- epoch milliseconds rather than a calendar date, because that is the rendering
@@ -124,42 +124,35 @@ testGoldenDataPointEnvelope = do
         values = TM.fromList [("feedId", AVText "EUR/USD"), ("rate", AVDecimal 1.0875)]
   (hashSignedDataPoint payload).value === "1ac5fa4ba0227c3e348464699c40b5f313ffbae4c12943e544d2e44d176b575c"
 
--- | A quote carried through the quote-to-values codec and hashed as a generic data
--- point. Pins the codec's output shape into the vector set: any change to the
--- field names or tags `quoteToValues` emits breaks this hash.
-testGoldenQuoteThroughValues : Script ()
-testGoldenQuoteThroughValues = do
-  let quote = Quote with feedId = "BTC/USD", price = 65000.0, priceTime = t0
-      payload = SignedDataPoint with
-        publishedAt = t0
-        expiresAt = t1
-        schemaVersion = "quote-1"
-        values = quoteToValues quote
-  (hashSignedDataPoint payload).value === "156a45a913599d7597df9e065d9f5b3dd57b41d5910da81e148368c9061de19e"
-
--- | The typed quote envelope: the same quote hashed as a typed record, with no
--- schema string. This is what a quote signature commits to.
+-- | A quote on the data point envelope: the normative vector for a signed quote,
+-- built through `signedQuote` exactly as a distributor builds it. There is no
+-- typed quote envelope — a quote is a payload at the quote schema — so this hash
+-- is what a quote signature commits to, and any change to the field names or
+-- tags `quoteToValues` emits breaks it.
 testGoldenQuoteEnvelope : Script ()
 testGoldenQuoteEnvelope = do
-  let payload = SignedQuote with
-        publishedAt = t0
-        expiresAt = t1
-        quote = Quote with feedId = "BTC/USD", price = 65000.0, priceTime = t0
-  (hashSignedQuote payload).value === "c6ef3856385d967474f7c84b2822b43c689ce5fd233e85c0d76680e3c907f138"
+  let quote = Quote with feedId = "BTC/USD", price = 65000.0, priceTime = t0
+      payload = signedQuote t0 t1 quote
+  payload.schemaVersion === quoteSchemaVersion
+  (hashSignedDataPoint payload).value === "156a45a913599d7597df9e065d9f5b3dd57b41d5910da81e148368c9061de19e"
 
--- | The quote envelope over the Go signer's own test fixture. Same envelope as
--- above at the values the Go implementation signs in its tests, so the two
--- implementations are pinned to one shared vector rather than to two vectors that
--- happen to agree. Note the half-second `priceTime`, which is representable in
--- epoch milliseconds and is the reason this fixture cannot be built from a
--- whole-second calendar time.
+-- | The root hash of the Go signer's own fixture values on the quote envelope.
+-- Named, because the Go signer in `pkg/cantonpulloracle` reproduces it: its
+-- `TestGoldenSignatureFixtures` asserts this exact value and freezes a signature
+-- over it, which `Test.ExternalSignerTest` then verifies here. The two
+-- implementations are pinned to one shared vector rather than to two that happen
+-- to agree.
+goFixtureQuoteHash : Text
+goFixtureQuoteHash = "8c71740fd3f4759759bc1b2bebf821d6dcbe80bf59418b764504b3930788b141"
+
+-- | The quote envelope over the Go signer's fixture values. Note the half-second
+-- `priceTime`, which is representable in epoch milliseconds and is the reason
+-- this fixture cannot be built from a whole-second calendar time.
 testGoldenQuoteEnvelopeGoFixture : Script ()
 testGoldenQuoteEnvelopeGoFixture = do
-  let payload = SignedQuote with
-        publishedAt = fromMillis 1717000005000
-        expiresAt = fromMillis 1717000605000
-        quote = Quote with
-          feedId = "KK_RFR_EURUSD"
-          price = 1.0825
-          priceTime = fromMillis 1717000004500
-  (hashSignedQuote payload).value === "61c440b8108e720c4a5fc4171ab34989f9769081090c63b081f0c11e0e8174d2"
+  let quote = Quote with
+        feedId = "KK_RFR_EURUSD"
+        price = 1.0825
+        priceTime = fromMillis 1717000004500
+      payload = signedQuote (fromMillis 1717000005000) (fromMillis 1717000605000) quote
+  (hashSignedDataPoint payload).value === goFixtureQuoteHash

@@ -25,8 +25,8 @@ template DistributorKeyPublication
       -- ^ The distributor's hex DER-SPKI secp256k1 public key.
     payloadCodec : Text
       -- ^ The envelope this key signs, for example the codecs package's
-      -- `quoteHashCodecId`. Verification refuses a key whose codec is not the
-      -- one it implements, so this field binds a key to a payload shape.
+      -- `dataPointHashCodecId`. Verification refuses a key whose codec is not
+      -- the one it implements, so this field binds a key to a payload shape.
   where
     signatory distributor
 

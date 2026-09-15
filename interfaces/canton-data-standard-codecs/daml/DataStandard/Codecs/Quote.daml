@@ -1,0 +1,132 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Price quotes, for the distributors and consumers that trade in them.
+--
+-- The standard defines no quote interface and no quote envelope: a quote is a
+-- data point whose payload carries three fields, so it travels the ordinary
+-- `PublishedDataPoint` and `SignedDataPoint` paths and needs nothing of its
+-- own.
+--
+-- Because this is a utility package its types are not serializable: a `Quote`
+-- is an in-memory value a distributor encodes on the way out and a consumer
+-- decodes on the way in. What a template stores is the `Values` payload.
+module DataStandard.Codecs.Quote
+  ( Quote(..)
+  , quoteSchemaVersion
+  , quoteToValues
+  , valuesToQuote
+  , signedQuote
+  , verifiedQuote
+  , feedIdField
+  , priceField
+  , priceTimeField
+  ) where
+
+import qualified DA.TextMap as TM
+
+import DataStandard.Utils (AnyValue(..), SignedDataPoint(..), Values, VerifiedDataPoint)
+
+-- | A single price for a named feed, observed at a market instant: the economic
+-- content of a quote and no more. Provenance — who published it and when — is
+-- carried by the data point that wraps it, so the same value is reusable
+-- wherever a quote appears.
+data Quote = Quote with
+    feedId : Text
+      -- ^ The price feed, for example "BTC/USD".
+    price : Decimal
+      -- ^ The quoted price, as an exact base-10 fixed-point number.
+    priceTime : Time
+      -- ^ The "as of" instant: the market time the price is observed for. Set
+      -- it equal to the publication's `publishedAt` for a feed with no distinct
+      -- observation time.
+  deriving (Eq, Show)
+
+-- | The `schemaVersion` a quote-shaped payload carries, on a published data
+-- point and inside a signed envelope alike. It is what tells a consumer the
+-- three fields below are there and mean what this module says they mean, and it
+-- is inside the signed hash, so a replayer cannot re-present a quote's values
+-- under another schema.
+quoteSchemaVersion : Text
+quoteSchemaVersion = "quote-1"
+
+-- | The `Values` field name carrying a quote's `feedId`.
+feedIdField : Text
+feedIdField = "feedId"
+
+-- | The `Values` field name carrying a quote's `price`.
+priceField : Text
+priceField = "price"
+
+-- | The `Values` field name carrying a quote's `priceTime`.
+priceTimeField : Text
+priceTimeField = "priceTime"
+
+-- | Render a quote as a data point payload. Total, and the inverse of
+-- `valuesToQuote` on every quote.
+quoteToValues : Quote -> Values
+quoteToValues q = TM.fromList
+  [ (feedIdField, AVText q.feedId)
+  , (priceField, AVDecimal q.price)
+  , (priceTimeField, AVTime q.priceTime)
+  ]
+
+-- | Read a quote back out of a payload, or explain why the payload is not one.
+-- Strict on purpose: exactly the three quote fields, each under its expected
+-- tag, and nothing else, so that two different payloads cannot decode to the
+-- same quote. The message names the field at fault.
+valuesToQuote : Values -> Either Text Quote
+valuesToQuote values = do
+  feedId <- requireText feedIdField
+  price <- requireDecimal priceField
+  priceTime <- requireTime priceTimeField
+  case [ k | (k, _) <- TM.toList values, k /= feedIdField, k /= priceField, k /= priceTimeField ] of
+    (extra :: _) -> Left ("unexpected field: " <> extra)
+    [] -> Right (Quote with feedId, price, priceTime)
+  where
+    require : Text -> Either Text AnyValue
+    require key = case TM.lookup key values of
+      None -> Left ("missing field: " <> key)
+      Some v -> Right v
+
+    wrongType : Text -> Either Text a
+    wrongType key = Left ("wrong type for field: " <> key)
+
+    requireText key = do
+      v <- require key
+      case v of
+        AVText t -> Right t
+        _ -> wrongType key
+
+    requireDecimal key = do
+      v <- require key
+      case v of
+        AVDecimal d -> Right d
+        _ -> wrongType key
+
+    requireTime key = do
+      v <- require key
+      case v of
+        AVTime t -> Right t
+        _ -> wrongType key
+
+-- | The envelope a distributor signs to deliver a quote over the pull path: an
+-- ordinary `SignedDataPoint` at the quote schema. `hashSignedDataPoint` hashes
+-- it and `verifyDataPoint` checks it, so the quote path adds no codec id and no
+-- second envelope to implement off-ledger.
+signedQuote : Time -> Time -> Quote -> SignedDataPoint
+signedQuote publishedAt expiresAt q = SignedDataPoint with
+  publishedAt
+  expiresAt
+  schemaVersion = quoteSchemaVersion
+  values = quoteToValues q
+
+-- | Read the quote out of a verified data point, refusing a payload published
+-- under any other schema. The counterpart of `signedQuote` on the consuming
+-- side: verify first, then decode, so a decode never runs on unauthenticated
+-- values.
+verifiedQuote : VerifiedDataPoint -> Either Text Quote
+verifiedQuote v
+  | v.schemaVersion /= quoteSchemaVersion =
+      Left ("unexpected schema version: " <> v.schemaVersion)
+  | otherwise = valuesToQuote v.values

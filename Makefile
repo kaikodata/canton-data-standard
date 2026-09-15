@@ -5,7 +5,7 @@
 # the same targets are meant to be run locally during development.
 
 DAR_GLOB := interfaces/*/.daml/dist/*.dar
-DAML_PKGS := $(shell find interfaces examples tests tests-codecs tests-crypto -name daml.yaml -not -path '*/.daml/*' -exec dirname {} \;)
+DAML_PKGS := $(shell find interfaces examples tests-fixtures tests tests-codecs tests-crypto -name daml.yaml -not -path '*/.daml/*' -exec dirname {} \;)
 
 .PHONY: build test validate lint headers-check clean ci dars dars-check
 

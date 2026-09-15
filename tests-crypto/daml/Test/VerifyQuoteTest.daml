@@ -1,33 +1,37 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Tests for `verifyQuote`/`verifyQuoteWith` against real secp256k1 keys. Each
--- script generates a keypair with `secp256k1generatekeypair`, signs a payload's
--- structural root hash with `secp256k1sign`, and checks the result through the
--- library.
+-- | The quote path over real secp256k1 keys: a quote signed as a data point,
+-- verified through the standard's one verifier, and decoded back to a `Quote`.
+--
+-- There is no quote envelope and no `verifyQuote`. What this suite covers is the
+-- round trip `DataStandard.Codecs.Quote` exists for — `signedQuote` on the way
+-- out, `verifiedQuote` on the way back — and the two ways it can fail that the
+-- generic data point tests have no analogue for: a signature that no longer
+-- matches after a quote field is edited, and an authenticated payload that is
+-- not a quote at all.
 --
 -- Verification is a pure function, so `now` is passed in explicitly and every
--- time here is a fixed epoch-millisecond value: no assertion depends on when
--- the suite runs. The payload is the golden `gvQuoteTyped` quote, which ties
--- these checks to the normative vector.
---
--- Failure messages are asserted exactly, because they are part of the library's
--- public surface: a consumer that aborts on them propagates them unchanged.
+-- time here is a fixed epoch-millisecond value: no assertion depends on when the
+-- suite runs. The payload is the golden quote envelope, which ties these checks
+-- to the normative vector.
 --
 -- Daml Script's crypto helpers run in-memory only, which is why this suite is
 -- separate from the live-runner `tests` package.
 module Test.VerifyQuoteTest where
 
 import DA.Assert ((===))
+import qualified DA.TextMap as TM
 import DA.Time (addRelTime, milliseconds)
 import Daml.Script
 
-import DataStandard.Codecs.Envelope
-  ( dataPointHashCodecId, hashSignedQuote, quoteHashCodecId )
+import DataStandard.Codecs.Envelope (dataPointHashCodecId, hashSignedDataPoint)
+import DataStandard.Codecs.Quote
+  ( Quote(..), quoteSchemaVersion, quoteToValues, signedQuote, verifiedQuote )
 import DataStandard.Codecs.StructuralHash (epoch)
-import DataStandard.Codecs.Verify (verifyQuote, verifyQuoteWith)
+import DataStandard.Codecs.Verify (verifyDataPoint, verifyDataPointWith)
 import DataStandard.DistributorKeyV1 (DistributorKeyView(..))
-import DataStandard.Utils (Quote(..), SignedQuote(..))
+import DataStandard.Utils (AnyValue(..), SignedDataPoint(..))
 
 fromMillis : Int -> Time
 fromMillis ms = addRelTime epoch (milliseconds ms)
@@ -40,20 +44,23 @@ t0 = fromMillis 1768480245000
 t1 : Time
 t1 = fromMillis 1768483845000
 
--- | The golden quote payload, whose root hash is the normative `gvQuoteTyped`.
-goldenPayload : SignedQuote
-goldenPayload = SignedQuote with
-  publishedAt = t0
-  expiresAt = t1
-  quote = Quote with
-    feedId = "BTC/USD"
-    price = 65000.0
-    priceTime = t0
+-- | The quote the golden envelope carries.
+goldenQuote : Quote
+goldenQuote = Quote with
+  feedId = "BTC/USD"
+  price = 65000.0
+  priceTime = t0
+
+-- | The golden quote payload, whose root hash is the normative
+-- `testGoldenQuoteEnvelope` vector.
+goldenPayload : SignedDataPoint
+goldenPayload = signedQuote t0 t1 goldenQuote
 
 -- | The normative root hash of `goldenPayload`, restated here so a regression in
--- the envelope surfaces in this suite too and not only in `tests-codecs`.
+-- the envelope or the codec surfaces in this suite too and not only in
+-- `tests-codecs`.
 goldenPayloadHash : Text
-goldenPayloadHash = "c6ef3856385d967474f7c84b2822b43c689ce5fd233e85c0d76680e3c907f138"
+goldenPayloadHash = "156a45a913599d7597df9e065d9f5b3dd57b41d5910da81e148368c9061de19e"
 
 -- | A distributor, a real keypair, and a signature over `goldenPayload`.
 data QuoteFixture = QuoteFixture with
@@ -65,25 +72,26 @@ setupQuote : Script QuoteFixture
 setupQuote = do
   distributor <- allocateParty "Distributor"
   keyPair <- secp256k1generatekeypair
-  signature <- signQuote keyPair.privateKey goldenPayload
+  signature <- signPayload keyPair.privateKey goldenPayload
   pure QuoteFixture with distributor, keyPair, signature
 
 -- | Sign a payload the way a distributor's off-ledger signer does: ECDSA over the
 -- structural root hash. `secp256k1sign` treats its message argument exactly as the
 -- on-ledger `secp256k1` builtin does, so a signature made here is one the builtin
 -- accepts.
-signQuote : Text -> SignedQuote -> Script Text
-signQuote privateKey payload =
-  secp256k1sign privateKey (hashSignedQuote payload).value
+signPayload : Text -> SignedDataPoint -> Script Text
+signPayload privateKey payload =
+  secp256k1sign privateKey (hashSignedDataPoint payload).value
 
--- | A published key naming this library's quote envelope.
+-- | A published key naming the standard's one envelope. A quote key is an
+-- ordinary data point key; there is no quote codec id to advertise.
 quoteKeyView : Party -> Text -> DistributorKeyView
 quoteKeyView distributor publicKey = DistributorKeyView with
   distributor
   publicKey
   signMethod = "secp256k1"
   hashMethod = "SHA-256"
-  payloadCodec = quoteHashCodecId
+  payloadCodec = dataPointHashCodecId
 
 expectLeft : Text -> Either Text a -> Script ()
 expectLeft expected result = case result of
@@ -95,20 +103,23 @@ expectRight result = case result of
   Left err -> abort ("expected success, got: " <> err)
   Right v -> pure v
 
--- A valid signature verifies, and the result carries the quote field-aligned with
--- the pushed view plus the evidence triple. `canonicalHash` is the structural root
--- hash, which is the normative golden vector.
+-- The whole round trip: a valid signature verifies, the result carries the
+-- evidence triple, and the authenticated payload decodes back to the quote that
+-- was signed. `canonicalHash` is the structural root hash, which is the normative
+-- golden vector.
 testVerifyQuoteHappyPath : Script ()
 testVerifyQuoteHappyPath = do
   f <- setupQuote
-  v <- expectRight (verifyQuoteWith f.distributor f.keyPair.publicKey t0 goldenPayload f.signature)
+  v <- expectRight (verifyDataPointWith f.distributor f.keyPair.publicKey t0 goldenPayload f.signature)
   v.distributor === f.distributor
   v.publishedAt === t0
-  v.quote === goldenPayload.quote
-  v.quote.price === 65000.0
+  v.schemaVersion === quoteSchemaVersion
   v.canonicalHash === goldenPayloadHash
   v.signature === f.signature
   v.publicKey === f.keyPair.publicKey
+  q <- expectRight (verifiedQuote v)
+  q === goldenQuote
+  q.price === 65000.0
 
 -- The view overload reads the distributor and the key off the published key, so a
 -- consumer never supplies either itself.
@@ -116,66 +127,76 @@ testVerifyQuoteThroughKeyView : Script ()
 testVerifyQuoteThroughKeyView = do
   f <- setupQuote
   let key = quoteKeyView f.distributor f.keyPair.publicKey
-  v <- expectRight (verifyQuote key t0 goldenPayload f.signature)
+  v <- expectRight (verifyDataPoint key t0 goldenPayload f.signature)
   v.distributor === f.distributor
   v.publicKey === f.keyPair.publicKey
   v.canonicalHash === goldenPayloadHash
 
--- The validity window is closed at both ends: the expiry instant itself still
--- verifies, and any later instant does not.
-testExpiryBoundaryIsInclusive : Script ()
-testExpiryBoundaryIsInclusive = do
-  f <- setupQuote
-  v <- expectRight (verifyQuoteWith f.distributor f.keyPair.publicKey t1 goldenPayload f.signature)
-  v.canonicalHash === goldenPayloadHash
-  expectLeft "payload expired"
-    (verifyQuoteWith f.distributor f.keyPair.publicKey (addRelTime t1 (milliseconds 1))
-      goldenPayload f.signature)
-
--- A window that ends before it begins is never live, and is rejected before the
--- clock is consulted at all.
-testPublishedAfterExpiryRejected : Script ()
-testPublishedAfterExpiryRejected = do
-  distributor <- allocateParty "Distributor"
-  keyPair <- secp256k1generatekeypair
-  let payload = goldenPayload with publishedAt = t1, expiresAt = t0
-  signature <- signQuote keyPair.privateKey payload
-  -- Genuinely signed, and still refused: the check is on the payload's own
-  -- coherence, not on the signature.
-  expectLeft "published after expiry"
-    (verifyQuoteWith distributor keyPair.publicKey t0 payload signature)
-
--- Expiry is the standard's sole replay defence: the same (payload, signature) pair
--- that verified inside the window stops verifying past it.
-testExpiredPayloadRejected : Script ()
-testExpiredPayloadRejected = do
-  f <- setupQuote
-  _ <- expectRight (verifyQuoteWith f.distributor f.keyPair.publicKey t0 goldenPayload f.signature)
-  expectLeft "payload expired"
-    (verifyQuoteWith f.distributor f.keyPair.publicKey (addRelTime t1 (milliseconds 1))
-      goldenPayload f.signature)
-
 -- A signature is bound to the exact payload it was made over. Editing the price
--- leaves a well-formed DER signature that no longer matches.
+-- leaves a well-formed DER signature that no longer matches — the property a
+-- typed quote envelope used to provide and the generic one provides just as well,
+-- because the quote's fields are inside the hashed payload.
 testTamperedPriceRejected : Script ()
 testTamperedPriceRejected = do
   f <- setupQuote
-  let tampered = goldenPayload with
-        quote = goldenPayload.quote with price = 66000.0
+  let tampered = signedQuote t0 t1 (goldenQuote with price = 66000.0)
   expectLeft "invalid signature"
-    (verifyQuoteWith f.distributor f.keyPair.publicKey t0 tampered f.signature)
+    (verifyDataPointWith f.distributor f.keyPair.publicKey t0 tampered f.signature)
 
--- Every signed field is covered, not just the price: the feed and the validity
--- window are inside the hash too.
+-- Every signed field is covered, not just the price: the feed, the observation
+-- instant and the validity window are inside the hash too.
 testTamperedFeedAndWindowRejected : Script ()
 testTamperedFeedAndWindowRejected = do
   f <- setupQuote
+  let check payload = expectLeft "invalid signature"
+        (verifyDataPointWith f.distributor f.keyPair.publicKey t0 payload f.signature)
+  check (signedQuote t0 t1 (goldenQuote with feedId = "ETH/USD"))
+  check (signedQuote t0 t1 (goldenQuote with priceTime = addRelTime t0 (milliseconds 1)))
+  check (goldenPayload with expiresAt = addRelTime t1 (milliseconds 1000))
+
+-- The quote schema is part of the signed payload, so a replayer cannot re-present
+-- an authentic quote's values under another schema and have it decode.
+testTamperedSchemaRejected : Script ()
+testTamperedSchemaRejected = do
+  f <- setupQuote
   expectLeft "invalid signature"
-    (verifyQuoteWith f.distributor f.keyPair.publicKey t0
-      (goldenPayload with quote = goldenPayload.quote with feedId = "ETH/USD") f.signature)
-  expectLeft "invalid signature"
-    (verifyQuoteWith f.distributor f.keyPair.publicKey t0
-      (goldenPayload with expiresAt = addRelTime t1 (milliseconds 1000)) f.signature)
+    (verifyDataPointWith f.distributor f.keyPair.publicKey t0
+      (goldenPayload with schemaVersion = "1.0.0") f.signature)
+
+-- A genuinely signed payload that is not a quote verifies and then fails to
+-- decode, which is the split the two steps exist for: the signature says who
+-- published it, the codec says what it is.
+testVerifiedNonQuoteDoesNotDecode : Script ()
+testVerifiedNonQuoteDoesNotDecode = do
+  distributor <- allocateParty "Distributor"
+  keyPair <- secp256k1generatekeypair
+  let payload = SignedDataPoint with
+        publishedAt = t0
+        expiresAt = t1
+        schemaVersion = "1.0.0"
+        values = TM.fromList [("feedId", AVText "EUR/USD"), ("rate", AVDecimal 1.0875)]
+  signature <- signPayload keyPair.privateKey payload
+  v <- expectRight (verifyDataPointWith distributor keyPair.publicKey t0 payload signature)
+  expectLeft "unexpected schema version: 1.0.0" (verifiedQuote v)
+  -- And a payload at the quote schema whose values are not a quote fails on the
+  -- field the codec is missing.
+  let mislabelled = payload with schemaVersion = quoteSchemaVersion
+  mislabelledSig <- signPayload keyPair.privateKey mislabelled
+  vMislabelled <- expectRight
+    (verifyDataPointWith distributor keyPair.publicKey t0 mislabelled mislabelledSig)
+  expectLeft "missing field: price" (verifiedQuote vMislabelled)
+
+-- The validity window is closed at both ends: the expiry instant itself still
+-- verifies, and any later instant does not. Expiry is the standard's sole replay
+-- defence, so the same (payload, signature) pair stops verifying past it.
+testExpiryBoundaryIsInclusive : Script ()
+testExpiryBoundaryIsInclusive = do
+  f <- setupQuote
+  v <- expectRight (verifyDataPointWith f.distributor f.keyPair.publicKey t1 goldenPayload f.signature)
+  v.canonicalHash === goldenPayloadHash
+  expectLeft "payload expired"
+    (verifyDataPointWith f.distributor f.keyPair.publicKey (addRelTime t1 (milliseconds 1))
+      goldenPayload f.signature)
 
 -- A signature from another key does not verify: the key is what authenticates the
 -- distributor, so a valid signature by the wrong signer is no signature at all.
@@ -184,22 +205,25 @@ testWrongKeyRejected = do
   f <- setupQuote
   other <- secp256k1generatekeypair
   expectLeft "invalid signature"
-    (verifyQuoteWith f.distributor other.publicKey t0 goldenPayload f.signature)
-  otherSig <- signQuote other.privateKey goldenPayload
+    (verifyDataPointWith f.distributor other.publicKey t0 goldenPayload f.signature)
+  otherSig <- signPayload other.privateKey goldenPayload
   expectLeft "invalid signature"
-    (verifyQuoteWith f.distributor f.keyPair.publicKey t0 goldenPayload otherSig)
+    (verifyDataPointWith f.distributor f.keyPair.publicKey t0 goldenPayload otherSig)
 
--- A key published for a different envelope is refused instead of being checked
--- against the wrong hash, and the codec is checked before anything else.
+-- The codec on the key is checked before anything else, so a key published for a
+-- product's own envelope is refused rather than checked against the wrong hash.
 testUnsupportedCodecRejected : Script ()
 testUnsupportedCodecRejected = do
   f <- setupQuote
-  let dataPointKey = (quoteKeyView f.distributor f.keyPair.publicKey) with
-        payloadCodec = dataPointHashCodecId
-  expectLeft "unsupported payload codec" (verifyQuote dataPointKey t0 goldenPayload f.signature)
-  -- Checked first: a payload that would also fail its window still reports the
-  -- codec, so the caller learns the key is the wrong one.
   let productKey = (quoteKeyView f.distributor f.keyPair.publicKey) with
         payloadCodec = "some-product-codec"
+  expectLeft "unsupported payload codec" (verifyDataPoint productKey t0 goldenPayload f.signature)
   expectLeft "unsupported payload codec"
-    (verifyQuote productKey (addRelTime t1 (milliseconds 1)) goldenPayload f.signature)
+    (verifyDataPoint productKey (addRelTime t1 (milliseconds 1)) goldenPayload f.signature)
+
+-- The encoding the signature covers is the codec's, so the vector is pinned here
+-- too: a quote payload is exactly the three tagged fields and nothing else.
+testSignedQuoteCarriesTheCodecsEncoding : Script ()
+testSignedQuoteCarriesTheCodecsEncoding = do
+  goldenPayload.values === quoteToValues goldenQuote
+  (hashSignedDataPoint goldenPayload).value === goldenPayloadHash
