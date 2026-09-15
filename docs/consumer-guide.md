@@ -19,12 +19,15 @@ with `dpm build --all`.
 
 Reference publications as `ContractId PublishedDataPoint` — the interface,
 never a template — so your code never names a distributor's package. What
-remains is the payload schema: the generic interface does not fix the keys
-inside `values`, so you read the keys you agreed on with the distributor and
+remains is the payload schema: the interface does not fix the keys inside
+`values`, so you read the keys you agreed on with the distributor and
 `schemaVersion` identifies that agreement. Switching to another distributor
 publishing the same schema is then a decision about which `distributor` party
-you trust. `PublishedQuote` has named fields in the view and drops the schema
-agreement for the feeds it covers.
+you trust.
+
+There is one interface, and a price quote comes through it like everything
+else. What a quote gets instead of an interface of its own is a codec: see
+[reading a price quote](#reading-a-price-quote) below.
 
 ## Reading inside your workflow
 
@@ -96,22 +99,34 @@ Unknown `values` fields and unknown `metadata` keys are normal; ignoring what
 you do not understand is what keeps an old consumer working against a newer
 distributor.
 
-## Reading a typed quote
+## Reading a price quote
 
-With `PublishedQuote` the price and feed id are typed fields on the view, so
-the payload-schema step disappears. Depend on the quote interface DAR,
-reference publications as `ContractId PublishedQuote`, and read through
-`PublishedQuote_Fetch`:
+A price quote is a `PublishedDataPoint` carrying `feedId`, `price` and
+`priceTime` under the schema `quote-1`. Instead of reading the three keys with
+`lookupField` calls of your own, take a `data-dependency` on
+`canton-data-standard-codecs` and hand the payload to `valuesToQuote`:
 
 ```daml
-v <- exercise quoteCid PublishedQuote_Fetch with actor = buyer
-assertMsg "feed mismatch" (v.quote.feedId == feedId)
-...  -- settle at v.quote.price
+import DataStandard.Codecs.Quote (Quote(..), quoteSchemaVersion, valuesToQuote)
+
+v <- exercise quoteCid PublishedDataPoint_Fetch with actor = buyer
+assertMsg "not a quote publication" (v.schemaVersion == quoteSchemaVersion)
+quote <- case valuesToQuote v.values of
+  Left err -> abort ("not a quote payload: " <> err)
+  Right q  -> pure q
+assertMsg "feed mismatch" (quote.feedId == feedId)
+...  -- settle at quote.price
 ```
 
-`quote.price` is a `Decimal` you read directly, with no `lookupField` and no
-`schemaVersion` to gate on. The checks above still apply. The full consumer is
+`quote.price` is a `Decimal` you read directly, and the decode is your schema
+gate: it is strict — exactly the three fields, each at its expected type — so a
+payload that is not a quote is rejected rather than half-read. The checks below
+still apply. The full consumer is
 [`examples/quote-consumer`](../examples/quote-consumer).
+
+`Quote` comes from the codecs package, which is a utility package, so it is not
+a serializable type: decode a payload into one, use it, and store whatever your
+own templates need.
 
 ## Switching distributors, and reading several at once
 
@@ -121,9 +136,10 @@ package. What ties you to a distributor is the data you trust: a
 is supplying a different `distributor`. The compiled code does not change.
 
 ```daml
-v <- exercise quoteCid PublishedQuote_Fetch with actor = buyer
+v <- exercise dataCid PublishedDataPoint_Fetch with actor = buyer
 assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
-assertMsg "feed mismatch" (v.quote.feedId == feedId)
+publishedPair <- required "assetPair" (lookupField "assetPair" v.values)
+assertMsg "asset pair mismatch" (publishedPair == assetPair)
 ```
 
 [`examples/switching-consumer`](../examples/switching-consumer) reads the same
@@ -144,29 +160,39 @@ authenticates any number of payloads.
 
 Take `data-dependencies` on the `canton-data-standard-distributor-key-v1` and
 `canton-data-standard-codecs` DARs alongside `utils-v1`. You receive a
-`SignedQuote` or `SignedDataPoint` record plus a signature; read the disclosed
-key through `DistributorKey_Fetch`, check the distributor is one you trust, and
-call the library:
+`SignedDataPoint` record plus a signature; read the disclosed key through
+`DistributorKey_Fetch`, check the distributor is one you trust, and call the
+library:
 
 ```daml
 now <- getTime
 kv  <- exercise keyCid DistributorKey_Fetch with actor = reader
 assertMsg "untrusted distributor" (kv.distributor == expectedDistributor)
-case verifyQuote kv now payload signature of
+case verifyDataPoint kv now payload signature of
   Left err -> abort err
-  Right v  -> ...  -- v : VerifiedQuote
+  Right v  -> ...  -- v : VerifiedDataPoint
 ```
 
-`verifyQuote` checks the key's advertised codec id, the signed validity window
-(`"published after expiry"`, `"payload expired"`) and the secp256k1 signature
-over the payload's structural hash, then returns a `VerifiedQuote`: the typed
-quote plus the evidence triple `canonicalHash`/`signature`/`publicKey`.
-`verifyDataPoint` is the generic sibling. Both take the verified `distributor`
-from the key's view rather than from the payload, and both return `Either Text`,
-so you decide whether a failure aborts the transaction. Verification runs inside
+`verifyDataPoint` checks the key's advertised codec id, the signed validity
+window (`"published after expiry"`, `"payload expired"`) and the secp256k1
+signature over the payload's structural hash, then returns a `VerifiedDataPoint`:
+the authenticated payload plus the evidence triple
+`canonicalHash`/`signature`/`publicKey`. It takes the verified `distributor`
+from the key's view rather than from the payload, and returns `Either Text`, so
+you decide whether a failure aborts the transaction. Verification runs inside
 your transaction and every validating participant re-executes it, exactly as it
 would an interface choice — but as library code in an upgradable package, a
 defect in it is fixable.
+
+A signed quote arrives the same way: it is a `SignedDataPoint` at the quote
+schema, so you verify it with `verifyDataPoint` and then recover the typed value
+with `verifiedQuote`, in that order — the decode never runs on values nobody has
+authenticated.
+
+```daml
+Right v <- pure (verifyDataPoint kv now payload signature)
+Right quote <- pure (verifiedQuote v)   -- quote : Quote
+```
 
 Your own checks — feed, staleness, price bounds — stay yours, as on the push
 path; `expiresAt` is the standard's only replay bound, so apply a tighter policy

@@ -1,20 +1,25 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | A reference producer for `PublishedQuote`. A distributor's whole obligation
--- is what this module does: implement the interface on a template it signs.
+-- | A reference producer for a price quote. There is no quote interface: a
+-- quote is a `PublishedDataPoint` at the quote schema, so this module
+-- implements the one interface the standard defines and lets
+-- `DataStandard.Codecs.Quote` turn the typed value into the payload. A
+-- distributor's whole obligation is still what this module does — implement the
+-- interface on a template it signs.
 module QuoteProducer.PriceOracle where
 
 import qualified DA.TextMap as TM
 
-import DataStandard.QuoteV1
+import DataStandard.Codecs.Quote (Quote(..), quoteSchemaVersion, quoteToValues)
+import DataStandard.DataPointV1
 import DataStandard.Utils
 
 -- | A published price quote for a single feed.
 --
 -- No observers, on purpose: a reader that is not a stakeholder obtains the
--- contract by explicit disclosure and reads it through `PublishedQuote_Fetch`,
--- so publishing costs the same at any audience size.
+-- contract by explicit disclosure and reads it through
+-- `PublishedDataPoint_Fetch`, so publishing costs the same at any audience size.
 template PriceQuote
   with
     oracle      : Party
@@ -28,15 +33,16 @@ template PriceQuote
   where
     signatory oracle
 
-    interface instance PublishedQuote for PriceQuote where
-      view = PublishedQuoteView with
-        distributor = oracle
-        quote = Quote with
+    interface instance PublishedDataPoint for PriceQuote where
+      view = PublishedDataPointView with
+        distributor   = oracle
+        publishedAt
+        schemaVersion = quoteSchemaVersion
+        values        = quoteToValues Quote with
           feedId
           price
           priceTime
-        publishedAt
-        metadata    = Metadata with
+        metadata      = Metadata with
           values = TM.fromList [("exampleoracle.com/source", "reference-implementation")]
 
     -- | Publish a fresh quote by archiving this contract and creating its

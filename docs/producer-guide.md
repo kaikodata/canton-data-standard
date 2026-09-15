@@ -93,28 +93,37 @@ small, since on-ledger data is costly. Publish `emptyMetadata` when you have
 nothing to attach. Metadata exists so that an annotation is never a reason to
 widen a view.
 
-## Publishing a typed quote
+## Publishing a price quote
 
-For a single price on a named feed, `DataStandard.QuoteV1.PublishedQuote` has
-named fields in the view, so there is no payload schema for a consumer to agree
-on. You implement it the same way. The economic content is a `Quote` record
-from `DataStandard.Utils`; the view adds the provenance the quote omits:
+A quote is not a separate interface. It is a `PublishedDataPoint` whose payload
+carries `feedId`, `price` and `priceTime`, published under the schema
+`quote-1`. `DataStandard.Codecs.Quote` gives you the record and the encoder, so
+you never spell the three field names out yourself:
 
 ```daml
-interface instance PublishedQuote for PriceQuote where
-  view = PublishedQuoteView with
-    distributor = oracle
-    quote       = Quote with feedId; price; priceTime
+import DataStandard.Codecs.Quote (Quote(..), quoteSchemaVersion, quoteToValues)
+
+interface instance PublishedDataPoint for PriceQuote where
+  view = PublishedDataPointView with
+    distributor   = oracle
     publishedAt
-    metadata    = emptyMetadata
+    schemaVersion = quoteSchemaVersion
+    values        = quoteToValues Quote with feedId; price; priceTime
+    metadata      = emptyMetadata
 ```
 
-`quote.priceTime` is the market instant the price is observed for;
-`publishedAt` is when you produced the quote, and a quote can be produced after
-the instant it prices. `PublishedQuote` is independent of `PublishedDataPoint`;
-implement both on one template if you want a publication readable either way,
-setting `distributor` and `publishedAt` identically across the two views. The
-full producer is [`examples/quote-producer`](../examples/quote-producer).
+`priceTime` is the market instant the price is observed for; `publishedAt` is
+when you produced the quote, and a quote can be produced after the instant it
+prices. A consumer reads the payload back with `valuesToQuote`, which is strict:
+exactly the three fields, each at its expected type, so a payload carrying
+anything else is not a quote. If your feed has more to say than a quote's three
+fields, publish it under a schema of your own rather than extending this one.
+The full producer is [`examples/quote-producer`](../examples/quote-producer).
+
+`Quote` lives in the codecs package, not in `utils-v1`, and so is not a
+serializable type: it is a value you encode on the way out and decode on the way
+in, never a template field. What a template stores is the `Values` payload, or
+the fields it builds one from.
 
 ## Publication lifecycle
 
@@ -156,18 +165,20 @@ Reads never archive it, so no number of consumers verifying concurrently can
 contend.
 
 What you sign is the structural hash of the payload, computed by
-`canton-data-standard-codecs`: `hashSignedQuote` over a `SignedQuote`
-(codec id `v2-quote-hash`), `hashSignedDataPoint` over a `SignedDataPoint`
-(`v2-datapoint-hash`), both records from `utils-v1`. Both envelopes commit to a
-validity window (`publishedAt`, `expiresAt`); `expiresAt` is the only replay
-bound the standard defines, so a captured payload and signature stop verifying
-once it lapses. An off-ledger signer needs only SHA-256, lowercase hex, string
-joins and the scalar rendering rules; the signature itself is ECDSA over the
-SHA-256 of the root hash's decoded bytes. The golden vectors in `tests-codecs`
-are the normative record of the scheme.
+`canton-data-standard-codecs`: `hashSignedDataPoint` over a `SignedDataPoint`
+from `utils-v1`, under the codec id `v2-datapoint-hash`. There is one envelope
+and one codec id, quotes included — `DataStandard.Codecs.Quote.signedQuote`
+builds the `SignedDataPoint` for a quote, and it is signed and verified exactly
+as any other payload is. The envelope commits to a validity window
+(`publishedAt`, `expiresAt`); `expiresAt` is the only replay bound the standard
+defines, so a captured payload and signature stop verifying once it lapses. An
+off-ledger signer needs only SHA-256, lowercase hex, string joins and the scalar
+rendering rules; the signature itself is ECDSA over the SHA-256 of the root
+hash's decoded bytes. The golden vectors in `tests-codecs` are the normative
+record of the scheme.
 
 The standard defines no on-ledger verification choice: a consumer calls
-`verifyQuote`/`verifyDataPoint` from its own choice against your disclosed
+`verifyDataPoint` from its own choice against your disclosed
 `DistributorKey`. See
 [`examples/distributor-key-producer`](../examples/distributor-key-producer) for
 the key publication and rotation, and the [consumer guide](consumer-guide.md)

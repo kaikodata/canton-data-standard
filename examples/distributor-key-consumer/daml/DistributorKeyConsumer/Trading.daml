@@ -8,6 +8,11 @@
 -- verification aborts the transaction, so no settlement can exist against an
 -- unverified price.
 --
+-- The payload is a `SignedDataPoint`, which is what a quote is on this path
+-- too: `DataStandard.Codecs.Quote` builds the payload on the signing side and
+-- recovers the typed `Quote` here, after the signature has been checked. That
+-- ordering matters — the decode never runs on values nobody has authenticated.
+--
 -- This package does not set `-Wno-crypto-text-is-alpha` and does not need to:
 -- calling a library function that imports the alpha builtins internally is an
 -- ordinary function call.
@@ -15,9 +20,10 @@ module DistributorKeyConsumer.Trading where
 
 import DA.Time (RelTime, subTime)
 
-import DataStandard.Codecs.Verify (verifyQuote)
+import DataStandard.Codecs.Quote (Quote(..), verifiedQuote)
+import DataStandard.Codecs.Verify (verifyDataPoint)
 import DataStandard.DistributorKeyV1
-import DataStandard.Utils (SignedQuote)
+import DataStandard.Utils (SignedDataPoint, VerifiedDataPoint)
 
 -- | An offer to trade `quantity` of `feedId` at whatever price a quote signed by
 -- the trusted distributor carries.
@@ -51,11 +57,14 @@ template SignedQuoteTradeOffer
     -- `fetch`: disclosure grants visibility but not the authority a `fetch`
     -- needs. The gates run in order: the key belongs to the pinned distributor,
     -- the payload verifies (codec, window, signature, with the library's
-    -- messages propagating unchanged), the feed matches, and the quote is
-    -- neither future-dated nor beyond the buyer's staleness policy.
+    -- messages propagating unchanged), the authenticated payload decodes as a
+    -- quote, the feed matches, and the quote is neither future-dated nor beyond
+    -- the buyer's staleness policy.
     choice AcceptSignedQuoteTrade : ContractId SignedQuoteTradeSettlement
       with
-        payload : SignedQuote
+        payload : SignedDataPoint
+          -- ^ The reconstructed payload the distributor signed: a quote, built
+          -- by `DataStandard.Codecs.Quote.signedQuote`.
         signature : Text
           -- ^ The distributor's signature over the payload's structural hash.
       controller buyer
@@ -63,18 +72,19 @@ template SignedQuoteTradeOffer
         now <- getTime
         kv <- exercise keyCid DistributorKey_Fetch with actor = buyer
         assertMsg "untrusted distributor" (kv.distributor == expectedDistributor)
-        case verifyQuote kv now payload signature of
+        case verifyDataPoint kv now payload signature of
           Left err -> abort err
           Right v -> do
-            assertMsg "feed mismatch" (v.quote.feedId == feedId)
+            quote <- decodeQuote v
+            assertMsg "feed mismatch" (quote.feedId == feedId)
             assertMsg "quote published in the future" (v.publishedAt <= now)
             assertMsg "quote too stale" (subTime now v.publishedAt <= maxQuoteAge)
             create SignedQuoteTradeSettlement with
               seller, buyer, feedId, quantity
-              price = v.quote.price
-              totalAmount = v.quote.price * quantity
+              price = quote.price
+              totalAmount = quote.price * quantity
               distributor = v.distributor
-              priceTime = v.quote.priceTime
+              priceTime = quote.priceTime
               publishedAt = v.publishedAt
               verifiedAt = now
               expiresAt = payload.expiresAt
@@ -118,3 +128,11 @@ template SignedQuoteTradeSettlement
     publicKey : Text
   where
     signatory seller, buyer
+
+-- | Recover the typed quote from an already-verified payload, aborting with the
+-- codec's own message when the distributor signed something that is not a
+-- quote.
+decodeQuote : VerifiedDataPoint -> Update Quote
+decodeQuote v = case verifiedQuote v of
+  Left err -> abort ("not a quote payload: " <> err)
+  Right q -> pure q

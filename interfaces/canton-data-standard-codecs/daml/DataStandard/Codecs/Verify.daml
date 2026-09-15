@@ -16,57 +16,23 @@
 -- The `Left` messages are ordered and exact, and are part of this package's
 -- public surface.
 module DataStandard.Codecs.Verify
-  ( verifyQuote
-  , verifyQuoteWith
-  , verifyDataPoint
+  ( verifyDataPoint
   , verifyDataPointWith
   ) where
 
 import DA.Crypto.Text (secp256k1)
 
-import DataStandard.Codecs.Envelope
-  ( dataPointHashCodecId, hashSignedDataPoint, hashSignedQuote, quoteHashCodecId )
+import DataStandard.Codecs.Envelope (dataPointHashCodecId, hashSignedDataPoint)
 import DataStandard.Codecs.StructuralHash (Hash)
 import DataStandard.DistributorKeyV1 (DistributorKeyView)
-import DataStandard.Utils
-  ( SignedDataPoint, SignedQuote, VerifiedDataPoint(..), VerifiedQuote(..) )
-
--- | Verify a signed quote against a distributor's published key. The key's
--- `payloadCodec` must name the quote envelope this package implements, so a key
--- published for another codec is refused rather than checked against the wrong
--- hash. The verified `distributor` comes from the key's view and never from the
--- payload.
---
--- Failures, in the order they are checked: `"unsupported payload codec"`,
--- `"published after expiry"`, `"payload expired"`, `"invalid signature"`.
-verifyQuote : DistributorKeyView -> Time -> SignedQuote -> Text -> Either Text VerifiedQuote
-verifyQuote key now payload signature = do
-  requireCodec quoteHashCodecId key
-  verifyQuoteWith key.distributor key.publicKey now payload signature
-
--- | Verify a signed quote against a distributor and key the caller pins itself,
--- for a caller holding the key by some means other than a `DistributorKey`
--- contract. Prefer `verifyQuote` when reading a published key: it also checks
--- the key was published for this envelope.
---
--- Failures, in the order they are checked: `"published after expiry"` (a window
--- ending before it begins is never live), `"payload expired"` (`now` strictly
--- after `expiresAt`; the boundary instant is accepted), `"invalid signature"`.
-verifyQuoteWith : Party -> Text -> Time -> SignedQuote -> Text -> Either Text VerifiedQuote
-verifyQuoteWith distributor publicKey now payload signature = do
-  let rootHash = hashSignedQuote payload
-  requireWindow payload.publishedAt payload.expiresAt now
-  requireSignature rootHash publicKey signature
-  Right VerifiedQuote with
-    distributor
-    publishedAt = payload.publishedAt
-    quote = payload.quote
-    canonicalHash = rootHash.value
-    signature
-    publicKey
+import DataStandard.Utils (SignedDataPoint, VerifiedDataPoint(..))
 
 -- | Verify a signed data point against a distributor's published key. The key's
--- `payloadCodec` must name the data point envelope this package implements.
+-- `payloadCodec` must name the envelope this package implements, so a key
+-- published for another codec is refused rather than checked against the wrong
+-- hash. The verified `distributor` comes from the key's view and never from the
+-- payload. A quote verifies through this function like any other payload; the
+-- typed value is then recovered with `DataStandard.Codecs.Quote.verifiedQuote`.
 --
 -- Failures, in the order they are checked: `"unsupported payload codec"`,
 -- `"published after expiry"`, `"payload expired"`, `"invalid signature"`.
@@ -76,8 +42,13 @@ verifyDataPoint key now payload signature = do
   verifyDataPointWith key.distributor key.publicKey now payload signature
 
 -- | Verify a signed data point against a distributor and key the caller pins
--- itself: the counterpart of `verifyQuoteWith`, with the same checks in the
--- same order.
+-- itself, for a caller holding the key by some means other than a
+-- `DistributorKey` contract. Prefer `verifyDataPoint` when reading a published
+-- key: it also checks the key was published for this envelope.
+--
+-- Failures, in the order they are checked: `"published after expiry"` (a window
+-- ending before it begins is never live), `"payload expired"` (`now` strictly
+-- after `expiresAt`; the boundary instant is accepted), `"invalid signature"`.
 verifyDataPointWith : Party -> Text -> Time -> SignedDataPoint -> Text -> Either Text VerifiedDataPoint
 verifyDataPointWith distributor publicKey now payload signature = do
   let rootHash = hashSignedDataPoint payload

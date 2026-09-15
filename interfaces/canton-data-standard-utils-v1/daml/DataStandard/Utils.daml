@@ -4,6 +4,11 @@
 -- | Shared value types for the Data Standard's payloads. Every interface
 -- package depends on this one, as do the applications implementing or consuming
 -- those interfaces. It is data-only, so it can be smart-contract-upgraded.
+--
+-- Only types an interface view or an on-ledger record needs live here. A price
+-- quote is not one of them: it is a `Values` payload like any other, and the
+-- `Quote` record that makes one convenient to build and read is implementor
+-- code in `DataStandard.Codecs.Quote`, not part of what defines an interface.
 module DataStandard.Utils where
 
 import DA.TextMap (TextMap)
@@ -84,43 +89,16 @@ instance FromAnyValue a => FromAnyValue (TextMap a) where
   fromAny (AVMap m) = traverseTextMap fromAny m
   fromAny _         = None
 
--- | A single price for a named feed, observed at a market instant: the economic
--- content of a quote and no more. Provenance belongs to the view that wraps a
--- `Quote`, so the same value can be reused across views.
-data Quote = Quote with
-    feedId : Text
-      -- ^ The price feed, for example "BTC/USD".
-    price : Decimal
-      -- ^ The quoted price, as an exact base-10 fixed-point number.
-    priceTime : Time
-      -- ^ The "as of" instant: the market time the price is observed for. Set it
-      -- equal to the view's `publishedAt` for a feed with no distinct
-      -- observation time.
-  deriving (Eq, Show)
-
--- | The record a consumer reconstructs and hands to `verifyQuote`: exactly the
--- fields the distributor signed off-ledger. The signature travels beside it,
--- since it is taken over the hash of these fields and so cannot cover itself.
+-- | The record a consumer reconstructs and hands to `verifyDataPoint`: exactly
+-- the fields the distributor signed off-ledger. The signature travels beside
+-- it, since it is taken over the hash of these fields and so cannot cover
+-- itself.
 --
 -- It lives in this data-only package rather than in the codec library so that
--- every distributor and consumer names one shape for a signed quote, and so a
--- template may store it: a utility package's types are not serializable.
-data SignedQuote = SignedQuote with
-    publishedAt : Time
-      -- ^ When the distributor produced and signed the quote. Same meaning as
-      -- `PublishedQuoteView.publishedAt`.
-    expiresAt : Time
-      -- ^ The instant after which the payload is refused; the boundary instant
-      -- itself is still accepted. This is the standard's only replay defence: a
-      -- captured (payload, signature) pair stops verifying once it lapses. Must
-      -- be at or after `publishedAt`.
-    quote : Quote
-      -- ^ The economic content, as in `PublishedQuoteView.quote`.
-  deriving (Eq, Show)
-
--- | The record a consumer reconstructs and hands to `verifyDataPoint`: exactly
--- the fields the distributor signed off-ledger, with the signature beside it,
--- as on `SignedQuote`.
+-- every distributor and consumer names one shape for a signed payload, and so a
+-- template may store it: a utility package's types are not serializable. A
+-- signed quote is one of these, carrying the quote's fields in `values` under
+-- the `DataStandard.Codecs.Quote` encoding.
 data SignedDataPoint = SignedDataPoint with
     publishedAt : Time
       -- ^ When the distributor produced and signed the data point. Same meaning
@@ -140,32 +118,13 @@ data SignedDataPoint = SignedDataPoint with
       -- alike.
   deriving (Eq, Show)
 
--- | What `verifyQuote` returns on success. It has no contract id: a consumer
--- uses the result in the same transaction and records whatever its own
--- templates need. The leading fields mirror `PublishedQuoteView`, so code
--- reading a verified quote matches code reading a pushed one; the trailing
--- three are the evidence needed to reproduce the check off-ledger.
-data VerifiedQuote = VerifiedQuote with
-    distributor : Party
-      -- ^ The distributor whose key validated the signature, taken from the key
-      -- and never from the payload.
-    publishedAt : Time
-      -- ^ From the verified payload.
-    quote : Quote
-      -- ^ The authenticated economic content.
-    canonicalHash : Text
-      -- ^ The structural root hash the signature committed to, hex-encoded.
-      -- Also the durable join key for anything referencing this verification.
-    signature : Text
-      -- ^ The verified signature, hex-encoded DER ECDSA.
-    publicKey : Text
-      -- ^ The key the signature verified against.
-  deriving (Eq, Show)
-
--- | What `verifyDataPoint` returns on success, mirroring
--- `PublishedDataPointView` in the same way `VerifiedQuote` mirrors the quote
--- view. There is no `metadata` field: metadata is an envelope annotation the
--- distributor does not sign, and so cannot be authenticated.
+-- | What `verifyDataPoint` returns on success. It has no contract id: a
+-- consumer uses the result in the same transaction and records whatever its own
+-- templates need. The leading fields mirror `PublishedDataPointView`, so code
+-- reading a verified payload matches code reading a pushed one; the trailing
+-- three are the evidence needed to reproduce the check off-ledger. There is no
+-- `metadata` field: metadata is an envelope annotation the distributor does not
+-- sign, and so cannot be authenticated.
 data VerifiedDataPoint = VerifiedDataPoint with
     distributor : Party
       -- ^ The distributor whose key validated the signature, taken from the key

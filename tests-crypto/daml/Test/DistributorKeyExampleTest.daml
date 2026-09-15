@@ -3,8 +3,8 @@
 
 -- | The example pair end to end: a distributor publishes a signing key, signs a
 -- quote off-ledger, and a consumer verifies and settles on it inside its own
--- choice. That is the pull flow in full — no verifier interface, and no
--- alpha-crypto flag in the consumer's package.
+-- choice. That is the pull flow in full — no verifier interface, no quote
+-- envelope of its own, and no alpha-crypto flag in the consumer's package.
 --
 -- The failure paths cover both sides of the split: the library's own messages
 -- (`"invalid signature"`, `"payload expired"`, `"unsupported payload codec"`)
@@ -18,10 +18,10 @@ import DA.Optional (isNone)
 import DA.Time (RelTime, addRelTime, hours, minutes)
 import Daml.Script
 
-import DataStandard.Codecs.Envelope
-  ( dataPointHashCodecId, hashSignedQuote, quoteHashCodecId )
+import DataStandard.Codecs.Envelope (dataPointHashCodecId, hashSignedDataPoint)
+import DataStandard.Codecs.Quote (Quote(..), signedQuote)
 import DataStandard.DistributorKeyV1 (DistributorKey)
-import DataStandard.Utils (Quote(..), SignedQuote(..))
+import DataStandard.Utils (SignedDataPoint)
 import DistributorKeyConsumer.Trading
 import DistributorKeyProducer.Publication
 
@@ -40,7 +40,7 @@ data ExampleFixture = ExampleFixture with
     disc : Disclosure
 
 setupExample : Script ExampleFixture
-setupExample = setupExampleWith quoteHashCodecId
+setupExample = setupExampleWith dataPointHashCodecId
 
 -- | As `setupExample`, publishing the key under a caller-chosen codec id so a test
 -- can pin the codec-mismatch path.
@@ -60,18 +60,17 @@ setupExampleWith payloadCodec = do
     keyIf = toInterfaceContractId @DistributorKey keyTpl
 
 -- | A valid quote payload: BTC/USD @ 65000, published now, expiring in an hour.
-livePayload : Time -> SignedQuote
-livePayload now = SignedQuote with
-  publishedAt = now
-  expiresAt = addRelTime now (hours 1)
-  quote = Quote with
-    feedId = "BTC/USD"
-    price = 65000.0
-    priceTime = addRelTime now (minutes (-1))
+-- Built with the codecs helper, which is the whole of what a distributor does to
+-- put a quote on the standard's one signed envelope.
+livePayload : Time -> SignedDataPoint
+livePayload now = signedQuote now (addRelTime now (hours 1)) Quote with
+  feedId = "BTC/USD"
+  price = 65000.0
+  priceTime = addRelTime now (minutes (-1))
 
-signQuote : Text -> SignedQuote -> Script Text
+signQuote : Text -> SignedDataPoint -> Script Text
 signQuote privateKey payload =
-  secp256k1sign privateKey (hashSignedQuote payload).value
+  secp256k1sign privateKey (hashSignedDataPoint payload).value
 
 -- | An offer from the fixture's seller to its buyer, pinning the fixture's
 -- distributor and key.
@@ -108,13 +107,13 @@ testSignedQuoteTradeSettles = do
   s.price === 65000.0
   s.totalAmount === 32500.0
   s.distributor === f.distributor
-  s.priceTime === payload.quote.priceTime
+  s.priceTime === addRelTime now (minutes (-1))
   s.publishedAt === payload.publishedAt
   s.verifiedAt === now
   s.expiresAt === payload.expiresAt
   -- The evidence triple: enough to re-verify the price off-ledger later, with no
   -- dependency on the key contract still being active.
-  s.canonicalHash === (hashSignedQuote payload).value
+  s.canonicalHash === (hashSignedDataPoint payload).value
   s.signature === sig
   s.publicKey === f.keyPair.publicKey
 
@@ -210,13 +209,10 @@ testStaleQuoteRejected = do
   f <- setupExample
   now <- getTime
   let producedAt = addRelTime now (hours (-2))
-      payload = SignedQuote with
-        publishedAt = producedAt
-        expiresAt = addRelTime now (hours 1)
-        quote = Quote with
-          feedId = "BTC/USD"
-          price = 65000.0
-          priceTime = producedAt
+      payload = signedQuote producedAt (addRelTime now (hours 1)) Quote with
+        feedId = "BTC/USD"
+        price = 65000.0
+        priceTime = producedAt
   sig <- signQuote f.keyPair.privateKey payload
   offerCid <- createOfferFor f "BTC/USD" f.distributor (hours 1)
   submitFailsWith f.buyer f.disc
@@ -231,7 +227,10 @@ testTamperedPriceRejectedWithLibraryMessage = do
   now <- getTime
   let payload = livePayload now
   sig <- signQuote f.keyPair.privateKey payload
-  let tampered = payload with quote = payload.quote with price = 1.0
+  let tampered = signedQuote payload.publishedAt payload.expiresAt Quote with
+        feedId = "BTC/USD"
+        price = 1.0
+        priceTime = addRelTime now (minutes (-1))
   offerCid <- createOffer f
   submitFailsWith f.buyer f.disc
     (exerciseCmd offerCid AcceptSignedQuoteTrade with payload = tampered, signature = sig)
@@ -256,24 +255,22 @@ testExpiredPayloadRejected : Script ()
 testExpiredPayloadRejected = do
   f <- setupExample
   now <- getTime
-  let payload = SignedQuote with
-        publishedAt = addRelTime now (hours (-2))
-        expiresAt = addRelTime now (minutes (-30))
-        quote = Quote with
-          feedId = "BTC/USD"
-          price = 65000.0
-          priceTime = addRelTime now (hours (-2))
+  let payload = signedQuote (addRelTime now (hours (-2))) (addRelTime now (minutes (-30))) Quote with
+        feedId = "BTC/USD"
+        price = 65000.0
+        priceTime = addRelTime now (hours (-2))
   sig <- signQuote f.keyPair.privateKey payload
   offerCid <- createOffer f
   submitFailsWith f.buyer f.disc
     (exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig)
     "payload expired"
 
--- A key published for the data point envelope does not verify quotes, even though
--- the key itself is genuine and the signature is over a real quote hash.
+-- A key published for a product's own envelope does not verify the standard's
+-- payloads, even though the key itself is genuine and the signature is over a
+-- real payload hash.
 testCodecMismatchRejected : Script ()
 testCodecMismatchRejected = do
-  f <- setupExampleWith dataPointHashCodecId
+  f <- setupExampleWith "some-product-codec"
   now <- getTime
   let payload = livePayload now
   sig <- signQuote f.keyPair.privateKey payload

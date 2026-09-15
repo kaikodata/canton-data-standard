@@ -13,6 +13,7 @@ import Daml.Script
 import DataStandard.DataPointV1
 import DataStandard.Utils
 import Test.Fixtures
+import Test.Templates
 
 testSubscriberReadsViewThroughInterface : Script ()
 testSubscriberReadsViewThroughInterface = do

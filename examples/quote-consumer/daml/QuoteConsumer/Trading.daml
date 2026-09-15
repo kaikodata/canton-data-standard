@@ -1,12 +1,20 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | A reference consumer for `PublishedQuote`. It depends only on the interface
--- package and names no distributor's template. The quote's `price` and `feedId`
--- are typed fields on the view, so there is no payload schema to agree on.
+-- | A reference consumer for a price quote. It depends only on the interface
+-- package and the codecs library, and names no distributor's template.
+--
+-- A quote is a `PublishedDataPoint` at the quote schema, so this consumer reads
+-- the one interface the standard defines and hands the payload to
+-- `valuesToQuote`. That decode is the schema agreement: it is strict, so it
+-- rejects anything that is not exactly a quote, and the consumer then works
+-- with typed `feedId`/`price`/`priceTime` fields rather than with `lookupField`
+-- calls of its own.
 module QuoteConsumer.Trading where
 
-import DataStandard.QuoteV1
+import DataStandard.Codecs.Quote (Quote(..), quoteSchemaVersion, valuesToQuote)
+import DataStandard.DataPointV1
+import DataStandard.Utils (Values)
 
 import DA.Time (RelTime, subTime)
 
@@ -20,14 +28,15 @@ template QuoteTradeOffer
     quantity : Decimal
     expectedDistributor : Party
       -- ^ The one distributor whose price the buyer accepts. The standard makes
-      -- the quote's `distributor` authentic; trusting that party is the
+      -- the publication's `distributor` authentic; trusting that party is the
       -- consumer's decision, so the buyer pins it here.
     maxQuoteAge : RelTime
       -- ^ The largest age, now minus `publishedAt`, the buyer will settle on. A
       -- pushed quote has no replay bound of its own.
-    quoteCid : ContractId PublishedQuote
-      -- ^ Any `PublishedQuote` publication, identified through the interface
-      -- rather than a concrete template.
+    quoteCid : ContractId PublishedDataPoint
+      -- ^ Any `PublishedDataPoint` publication, identified through the interface
+      -- rather than a concrete template. It must carry the quote schema, which
+      -- the decode below enforces.
   where
     signatory seller
     observer buyer
@@ -39,17 +48,19 @@ template QuoteTradeOffer
       controller buyer
       do
         now <- getTime
-        v <- exercise quoteCid PublishedQuote_Fetch with actor = buyer
-        assertMsg "feed mismatch" (v.quote.feedId == feedId)
+        v <- exercise quoteCid PublishedDataPoint_Fetch with actor = buyer
+        assertMsg "not a quote publication" (v.schemaVersion == quoteSchemaVersion)
+        quote <- decodeQuote v.values
+        assertMsg "feed mismatch" (quote.feedId == feedId)
         assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
         assertMsg "quote published in the future" (v.publishedAt <= now)
         assertMsg "quote too stale" (subTime now v.publishedAt <= maxQuoteAge)
         create QuoteTradeSettlement with
           seller, buyer, feedId, quantity
-          price       = v.quote.price
-          totalAmount = v.quote.price * quantity
+          price       = quote.price
+          totalAmount = quote.price * quantity
           distributor = v.distributor
-          priceTime   = v.quote.priceTime
+          priceTime   = quote.priceTime
           publishedAt = v.publishedAt
 
     choice CancelQuoteOffer : ()
@@ -72,3 +83,10 @@ template QuoteTradeSettlement
     publishedAt : Time
   where
     signatory seller, buyer
+
+-- | Decode a payload the consumer expects to be a quote, aborting with the
+-- codec's own message when it is not.
+decodeQuote : Values -> Update Quote
+decodeQuote values = case valuesToQuote values of
+  Left err -> abort ("not a quote payload: " <> err)
+  Right q -> pure q

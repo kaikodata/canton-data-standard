@@ -30,7 +30,7 @@ publishKey : Party -> Script (ContractId DistributorKeyPublication)
 publishKey distributor = submit distributor $ createCmd DistributorKeyPublication with
   distributor
   publicKey = samplePublicKey
-  payloadCodec = "v2-quote-hash"
+  payloadCodec = "v2-datapoint-hash"
 
 testViewExposesKeyAndScheme : Script ()
 testViewExposesKeyAndScheme = do
@@ -42,7 +42,7 @@ testViewExposesKeyAndScheme = do
   v.publicKey === samplePublicKey
   v.signMethod === "secp256k1"
   v.hashMethod === "SHA-256"
-  v.payloadCodec === "v2-quote-hash"
+  v.payloadCodec === "v2-datapoint-hash"
 
 -- The read path the standard exists for: a consumer that is no stakeholder of the
 -- publication obtains it through explicit disclosure and reads it by exercising
@@ -101,7 +101,7 @@ testRotateKeyReplacesThePublication = do
     (toInterfaceContractId @DistributorKey newCid)
   v.publicKey === rotatedPublicKey
   v.distributor === distributor
-  v.payloadCodec === "v2-quote-hash"
+  v.payloadCodec === "v2-datapoint-hash"
 
 -- A retired key is unreadable even by a consumer that had it disclosed, which is
 -- what makes rotation an effective revocation.

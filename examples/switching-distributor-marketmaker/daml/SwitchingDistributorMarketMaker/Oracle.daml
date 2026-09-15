@@ -3,48 +3,33 @@
 
 -- | A reference distributor for the switching demonstration: a structurally
 -- different oracle. It stores a bid and an ask rather than a price and derives
--- the mid for the views, but implements the same two interfaces as
--- `SwitchingDistributorDirect.Oracle` and exposes the identical view shape. A
--- consumer reading through the interfaces cannot tell the two apart, which is
--- what shows the consumer is decoupled from how the data is stored and not only
--- from which party publishes it.
+-- the mid for the view, but implements the same interface as
+-- `SwitchingDistributorDirect.Oracle` and exposes a view a consumer reads
+-- identically. It publishes the mid under the same `assetPair`/`price` keys and
+-- adds `bid`/`ask` beside them, which a consumer reading only the two ignores —
+-- which is what shows the consumer is decoupled from how the data is stored and
+-- not only from which party publishes it.
 module SwitchingDistributorMarketMaker.Oracle where
 
 import qualified DA.TextMap as TM
 
 import DataStandard.DataPointV1
-import DataStandard.QuoteV1
 import DataStandard.Utils
 
--- | A published two-sided market for a single feed; the views expose the mid.
+-- | A published two-sided market for a single feed; the view exposes the mid.
 -- No observers, as with the direct distributor.
 template MarketMakerQuote
   with
     oracle      : Party
       -- ^ The distributor; signs and owns the publication.
-    feedId      : Text
-      -- ^ The feed, as named by the typed view.
     assetPair   : Text
-      -- ^ The same feed under the key the generic payload uses.
+      -- ^ The feed, under the key the payload uses.
     bid         : Decimal
     ask         : Decimal
-    priceTime   : Time
-      -- ^ The market time the two-sided market is observed for.
     publishedAt : Time
       -- ^ When the market was produced.
   where
     signatory oracle
-
-    interface instance PublishedQuote for MarketMakerQuote where
-      view = PublishedQuoteView with
-        distributor = oracle
-        quote = Quote with
-          feedId
-          price = mid bid ask
-          priceTime
-        publishedAt
-        metadata    = Metadata with
-          values = TM.fromList [("examplemarketmaker.com/source", "reference-implementation")]
 
     interface instance PublishedDataPoint for MarketMakerQuote where
       view = PublishedDataPointView with
@@ -65,7 +50,6 @@ template MarketMakerQuote
       with
         newBid         : Decimal
         newAsk         : Decimal
-        newPriceTime   : Time
         newPublishedAt : Time
       controller oracle
       do
@@ -73,7 +57,6 @@ template MarketMakerQuote
         create this with
           bid         = newBid
           ask         = newAsk
-          priceTime   = newPriceTime
           publishedAt = newPublishedAt
 
 -- | The mid price of a two-sided market: the arithmetic mean of bid and ask.

@@ -1,13 +1,17 @@
 -- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Tests for `verifyDataPoint`/`verifyDataPointWith` against real secp256k1 keys,
--- mirroring `Test.VerifyQuoteTest` on the generic payload shape.
+-- | Tests for `verifyDataPoint`/`verifyDataPointWith` against real secp256k1 keys.
+-- Each script generates a keypair with `secp256k1generatekeypair`, signs a
+-- payload's structural root hash with `secp256k1sign`, and checks the result
+-- through the library.
 --
--- The data point side adds two things the quote side has no analogue for: the
--- signature commits to `schemaVersion`, so authentic values cannot be re-presented
--- under a different schema, and the payload is a recursive value tree, so the tests
--- tamper inside a nested map as well as at the top level.
+-- This is the whole of the standard's verification surface: there is one envelope
+-- and one pair of entry points, and a quote goes through them like any other
+-- payload (`Test.VerifyQuoteTest`). The signature commits to `schemaVersion`, so
+-- authentic values cannot be re-presented under a different schema, and the
+-- payload is a recursive value tree, so the tests tamper inside a nested map as
+-- well as at the top level.
 module Test.VerifyDataPointTest where
 
 import DA.Assert ((===))
@@ -15,8 +19,7 @@ import qualified DA.TextMap as TM
 import DA.Time (addRelTime, milliseconds)
 import Daml.Script
 
-import DataStandard.Codecs.Envelope
-  ( dataPointHashCodecId, hashSignedDataPoint, quoteHashCodecId )
+import DataStandard.Codecs.Envelope (dataPointHashCodecId, hashSignedDataPoint)
 import DataStandard.Codecs.StructuralHash (epoch)
 import DataStandard.Codecs.Verify (verifyDataPoint, verifyDataPointWith)
 import DataStandard.DistributorKeyV1 (DistributorKeyView(..))
@@ -161,15 +164,17 @@ testWrongKeyRejected = do
   expectLeft "invalid signature"
     (verifyDataPointWith f.distributor f.keyPair.publicKey t0 goldenPayload otherSig)
 
--- A quote key does not verify data points, and the codec is checked first.
+-- A key published for a product's own envelope does not verify the standard's,
+-- and the codec is checked first: a payload that would also fail its window still
+-- reports the codec, so the caller learns the key is the wrong one.
 testUnsupportedCodecRejected : Script ()
 testUnsupportedCodecRejected = do
   f <- setupDataPoint
-  let quoteKey = (dataPointKeyView f.distributor f.keyPair.publicKey) with
-        payloadCodec = quoteHashCodecId
-  expectLeft "unsupported payload codec" (verifyDataPoint quoteKey t0 goldenPayload f.signature)
+  let productKey = (dataPointKeyView f.distributor f.keyPair.publicKey) with
+        payloadCodec = "some-product-codec"
+  expectLeft "unsupported payload codec" (verifyDataPoint productKey t0 goldenPayload f.signature)
   expectLeft "unsupported payload codec"
-    (verifyDataPoint quoteKey (addRelTime t1 (milliseconds 1)) goldenPayload f.signature)
+    (verifyDataPoint productKey (addRelTime t1 (milliseconds 1)) goldenPayload f.signature)
 
 -- A nested value tree round-trips through signing and verification, so the
 -- recursive part of the hash is exercised against a real signature and not only

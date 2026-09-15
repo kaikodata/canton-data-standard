@@ -2,63 +2,25 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 -- | The consumer side of the switching demonstration. It depends only on the
--- interface packages and names no distributor's template, so switching
--- distributor is re-pointing the trusted `(distributor, feedId)` pair, which
+-- interface package and names no distributor's template, so switching
+-- distributor is re-pointing the trusted `(distributor, assetPair)` pair, which
 -- arrives as offer data. Nothing is recompiled: the two structurally different
 -- distributors in this demonstration are read by the same compiled choices.
 module SwitchingConsumer.Trading where
 
 import DataStandard.DataPointV1
-import DataStandard.QuoteV1
 import DataStandard.Utils
 
--- | An offer to trade `quantity` of `feedId` at the price the referenced quote
--- carries, settling only when that quote comes from the trusted distributor.
-template QuoteSwitchOffer
-  with
-    seller              : Party
-    buyer               : Party
-    expectedDistributor : Party
-      -- ^ The one distributor whose quote the buyer accepts. Pointing this at
-      -- another party is all there is to switching distributor.
-    feedId              : Text
-    quantity            : Decimal
-    quoteCid            : ContractId PublishedQuote
-      -- ^ Any `PublishedQuote` publication, identified through the interface
-      -- rather than a concrete template.
-  where
-    signatory seller
-    observer buyer
-
-    -- | Settle the trade at the quoted price, in the buyer's transaction. The
-    -- distributor gate below reads offer data, never code, which is why both
-    -- distributors in this demonstration settle here without a Daml change. A
-    -- production consumer would also bound the age of `publishedAt`.
-    choice AcceptQuoteSwitch : ContractId QuoteSwitchSettlement
-      controller buyer
-      do
-        v <- exercise quoteCid PublishedQuote_Fetch with actor = buyer
-        assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
-        assertMsg "feed mismatch" (v.quote.feedId == feedId)
-        create QuoteSwitchSettlement with
-          seller, buyer, feedId, quantity
-          price       = v.quote.price
-          totalAmount = v.quote.price * quantity
-          distributor = v.distributor
-          priceTime   = v.quote.priceTime
-          publishedAt = v.publishedAt
-
-    choice CancelQuoteSwitchOffer : ()
-      controller seller
-      do pure ()
-
--- | The generic-payload counterpart of `QuoteSwitchOffer`.
+-- | An offer to trade `quantity` of `assetPair` at the price the referenced
+-- publication carries, settling only when it comes from the trusted
+-- distributor.
 template DataPointSwitchOffer
   with
     seller              : Party
     buyer               : Party
     expectedDistributor : Party
-      -- ^ The one distributor whose data the buyer accepts.
+      -- ^ The one distributor whose data the buyer accepts. Pointing this at
+      -- another party is all there is to switching distributor.
     assetPair           : Text
     quantity            : Decimal
     dataCid             : ContractId PublishedDataPoint
@@ -68,9 +30,12 @@ template DataPointSwitchOffer
     signatory seller
     observer buyer
 
-    -- | Settle the trade at the published price. It reads `assetPair` and
-    -- `price` and ignores every other field, so the market maker's extra
-    -- `bid`/`ask` keys are harmless.
+    -- | Settle the trade at the published price, in the buyer's transaction. It
+    -- reads `assetPair` and `price` and ignores every other field, so the market
+    -- maker's extra `bid`/`ask` keys are harmless. The distributor gate below
+    -- reads offer data, never code, which is why both distributors in this
+    -- demonstration settle here without a Daml change. A production consumer
+    -- would also bound the age of `publishedAt`.
     choice AcceptDataPointSwitch : ContractId DataPointSwitchSettlement
       controller buyer
       do
@@ -98,34 +63,38 @@ template CrossCheckOffer
     buyer                : Party
     expectedDistributorA : Party
     expectedDistributorB : Party
-    feedId               : Text
+    assetPair            : Text
     quantity             : Decimal
     tolerance            : Decimal
       -- ^ The largest price difference between the two distributors the buyer
       -- will still settle on.
-    quoteCidA            : ContractId PublishedQuote
-    quoteCidB            : ContractId PublishedQuote
+    dataCidA             : ContractId PublishedDataPoint
+    dataCidB             : ContractId PublishedDataPoint
   where
     signatory seller
     observer buyer
 
     -- | Settle only when both trusted distributors agree within `tolerance`.
-    -- Each quote is gated against its own expected distributor and the shared
-    -- feed; the standard authenticates each distributor independently.
+    -- Each publication is gated against its own expected distributor and the
+    -- shared feed; the standard authenticates each distributor independently.
     choice AcceptCrossCheck : ContractId CrossCheckSettlement
       controller buyer
       do
-        vA <- exercise quoteCidA PublishedQuote_Fetch with actor = buyer
-        vB <- exercise quoteCidB PublishedQuote_Fetch with actor = buyer
+        vA <- exercise dataCidA PublishedDataPoint_Fetch with actor = buyer
+        vB <- exercise dataCidB PublishedDataPoint_Fetch with actor = buyer
         assertMsg "untrusted distributor" (vA.distributor == expectedDistributorA)
         assertMsg "untrusted distributor" (vB.distributor == expectedDistributorB)
-        assertMsg "feed mismatch" (vA.quote.feedId == feedId)
-        assertMsg "feed mismatch" (vB.quote.feedId == feedId)
+        pairA <- required "assetPair" (lookupField "assetPair" vA.values)
+        pairB <- required "assetPair" (lookupField "assetPair" vB.values)
+        assertMsg "asset pair mismatch" (pairA == assetPair)
+        assertMsg "asset pair mismatch" (pairB == assetPair)
+        priceA <- required "price" (lookupField "price" vA.values)
+        priceB <- required "price" (lookupField "price" vB.values)
         assertMsg "distributors disagree beyond tolerance"
-          (abs (vA.quote.price - vB.quote.price) <= tolerance)
-        let settledPrice = (vA.quote.price + vB.quote.price) / 2.0
+          (abs (priceA - priceB) <= tolerance)
+        let settledPrice = (priceA + priceB) / 2.0
         create CrossCheckSettlement with
-          seller, buyer, feedId, quantity
+          seller, buyer, assetPair, quantity
           price        = settledPrice
           totalAmount  = settledPrice * quantity
           distributorA = vA.distributor
@@ -136,21 +105,6 @@ template CrossCheckOffer
     choice CancelCrossCheckOffer : ()
       controller seller
       do pure ()
-
--- | The record of a trade settled off a single distributor's quote.
-template QuoteSwitchSettlement
-  with
-    seller      : Party
-    buyer       : Party
-    feedId      : Text
-    quantity    : Decimal
-    price       : Decimal
-    totalAmount : Decimal
-    distributor : Party
-    priceTime   : Time
-    publishedAt : Time
-  where
-    signatory seller, buyer
 
 -- | The record of a trade settled off a single distributor's data point.
 template DataPointSwitchSettlement
@@ -167,12 +121,12 @@ template DataPointSwitchSettlement
     signatory seller, buyer
 
 -- | The record of a trade settled off two distributors that agreed within
--- tolerance, capturing both and when each produced its quote.
+-- tolerance, capturing both and when each produced its publication.
 template CrossCheckSettlement
   with
     seller       : Party
     buyer        : Party
-    feedId       : Text
+    assetPair    : Text
     quantity     : Decimal
     price        : Decimal
     totalAmount  : Decimal

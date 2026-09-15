@@ -1,0 +1,45 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The test suite's own implementations of the standard's interfaces.
+--
+-- They live in a package of their own, separate from the scripts that use them,
+-- because a package that defines templates and also depends on `daml-script`
+-- carries `daml-script` onto any participant it is uploaded to. The `tests` DAR
+-- is meant to run against a live ledger, so that would be a real cost rather
+-- than a theoretical one.
+module Test.Templates where
+
+import qualified DA.TextMap as TM
+
+import DataStandard.DataPointV1
+import DataStandard.Utils
+
+-- | A minimal `PublishedDataPoint` implementation, just enough to exercise the
+-- interface. The full example templates live in `examples/`.
+--
+-- Its payload is deliberately not a quote and not the examples' schema: it
+-- carries `feedId`/`rate` under schema "1.0.0", which is what makes it the
+-- foreign-schema case the consumer tests reject.
+template TestFeed
+  with
+    oracle     : Party
+    subscriber : Party
+    feedId     : Text
+    rate       : Decimal
+    at         : Time
+    meta       : Metadata
+  where
+    signatory oracle
+    observer subscriber
+
+    interface instance PublishedDataPoint for TestFeed where
+      view = PublishedDataPointView with
+        distributor   = oracle
+        publishedAt   = at
+        schemaVersion = "1.0.0"
+        values        = TM.fromList
+          [ ("feedId", AVText feedId)
+          , ("rate",   AVDecimal rate)
+          ]
+        metadata      = meta
