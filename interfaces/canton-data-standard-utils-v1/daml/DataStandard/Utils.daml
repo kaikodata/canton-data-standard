@@ -28,7 +28,24 @@ data AnyValue
   | AVBool Bool
   | AVList [AnyValue]
   | AVMap (TextMap AnyValue)
+  | AVParty Party
+  | AVInstrumentId InstrumentId
   deriving (Eq, Show)
+
+-- | A globally unique identifier for an instrument, so a payload can name the
+-- asset it prices in the form a lending venue or any other token-standard
+-- application already keys on. It mirrors `Splice.Api.Token.HoldingV2`'s
+-- `InstrumentId` field for field instead of importing it, which keeps the
+-- standard free of the token-standard dependency; converting between the two
+-- is a record copy.
+data InstrumentId = InstrumentId with
+    admin : Party
+      -- ^ The party representing the registry app that administers the
+      -- instrument.
+    id : Text
+      -- ^ The identifier used for the instrument by the instrument admin,
+      -- unique and unambiguous per admin.
+  deriving (Eq, Ord, Show)
 
 -- | A data point's payload: a map from field name to tagged value. Which fields
 -- a feed carries, and at which types, is what the `schemaVersion` on the view
@@ -70,6 +87,16 @@ instance ToAnyValue Bool where toAny = AVBool
 instance FromAnyValue Bool where
   fromAny (AVBool b) = Some b
   fromAny _          = None
+
+instance ToAnyValue Party where toAny = AVParty
+instance FromAnyValue Party where
+  fromAny (AVParty p) = Some p
+  fromAny _           = None
+
+instance ToAnyValue InstrumentId where toAny = AVInstrumentId
+instance FromAnyValue InstrumentId where
+  fromAny (AVInstrumentId i) = Some i
+  fromAny _                  = None
 
 instance ToAnyValue AnyValue where toAny = identity
 instance FromAnyValue AnyValue where fromAny = Some

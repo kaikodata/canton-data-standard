@@ -11,8 +11,8 @@ import your package.
 ```yaml
 # daml.yaml
 data-dependencies:
-  - <path-to>/canton-data-standard-utils-v1-0.2.0.dar
-  - <path-to>/canton-data-standard-datapoint-v1-0.2.0.dar
+  - <path-to>/canton-data-standard-utils-v1-0.3.0.dar
+  - <path-to>/canton-data-standard-datapoint-v1-0.3.0.dar
 ```
 
 The built DARs are committed under [`dars/`](../dars), and are also attached to
@@ -57,8 +57,21 @@ The full producer is [`examples/datapoint-producer`](../examples/datapoint-produ
 ## The `values` payload
 
 `Values` maps field names to `AnyValue`: the scalars `Int`, `Decimal`, `Text`,
-`Time`, `Bool`, plus an ordered list and a string-keyed map. Lists and maps
-nest, so a structured payload such as an index's constituents is expressible.
+`Time`, `Bool`, the identifiers `Party` and `InstrumentId`, plus an ordered list
+and a string-keyed map. Lists and maps nest, so a structured payload such as an
+index's constituents is expressible.
+
+`InstrumentId` mirrors the token standard's `Splice.Api.Token.HoldingV2`
+`InstrumentId` (`admin : Party`, `id : Text`) field for field, so a payload can
+name the instrument it prices the way a lending venue or wallet already does,
+without the standard depending on the token-standard packages. Converting
+between the two is a record copy:
+
+```daml
+let instrument = InstrumentId with admin = holdingId.admin, id = holdingId.id
+values = insertField "instrument" instrument
+       $ insertField "price" price TM.empty
+```
 
 The set is closed because the pull path reconstructs payloads on-ledger to
 check a signature, which needs one encoding per value. It lives in

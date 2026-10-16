@@ -36,6 +36,6 @@ The reference producers and consumers are illustrative, not production code.
 
 ## Supported versions
 
-The standard is pre-release (`0.2.0`). Fixes land on the current version line
+The standard is pre-release (`0.3.0`). Fixes land on the current version line
 until the first tagged release, after which this section will track which
 versions receive security updates.

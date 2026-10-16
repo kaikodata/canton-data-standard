@@ -14,6 +14,7 @@
 module Test.GoldenVectorsTest where
 
 import DA.Assert ((===))
+import qualified DA.Text as T
 import qualified DA.TextMap as TM
 import DA.Time (addRelTime, milliseconds)
 import Daml.Script
@@ -21,7 +22,7 @@ import Daml.Script
 import DataStandard.Codecs.Envelope (hashSignedDataPoint)
 import DataStandard.Codecs.Quote (Quote(..), quoteSchemaVersion, signedQuote)
 import DataStandard.Codecs.StructuralHash (Hashable(hash), epoch, timeToMillis)
-import DataStandard.Utils (AnyValue(..), SignedDataPoint(..))
+import DataStandard.Utils (AnyValue(..), InstrumentId(..), SignedDataPoint(..))
 
 -- | 2026-01-15T12:30:45Z, the envelope vectors' publication instant. Built from
 -- epoch milliseconds rather than a calendar date, because that is the rendering
@@ -66,6 +67,31 @@ testGoldenScalars = do
   (hash (AVText "")).value === "211468a63cd5d4a03977b9f390cd347d19aca0ac7dcb82d8dd93060c66a07ae1"
   (hash (AVBool True)).value === "13c46a363e251ace723eded1568faddac200fcc9b576881e9bdda466bdbf3e05"
   (hash (AVTime epoch)).value === "ef2eaacbb2b364f08d4c216f5d35cd6b73f9d891075a8f26acd3e293221db407"
+
+-- | A fixed party id: a hint plus a `1220`-prefixed namespace fingerprint, the
+-- shape every Canton 3.x party id takes. Parsed rather than allocated, so the
+-- vectors do not depend on the fingerprint a test ledger happens to mint.
+registry : Party
+registry = case partyFromText ("Registry::1220" <> T.implode (replicate 32 "ab")) of
+  Some p -> p
+  None -> error "registry: not a valid party id"
+
+-- | A party hashes as its full id text, and an instrument id as the 2-field
+-- record `admin`, `id`, each under its own constructor tag. The map vector is
+-- the shape a lending venue's price feed carries: the priced instrument, its
+-- price, and the registry administering it.
+testGoldenPartyAndInstrumentId : Script ()
+testGoldenPartyAndInstrumentId = do
+  partyToText registry === "Registry::1220abababababababababababababababababababababababababababababababab"
+  let usdcx = InstrumentId with admin = registry, id = "USDCx"
+  (hash (AVParty registry)).value === "8adf9846dd1546aabd7a5bf407c32384baf850993a1771fdf75d723d1a2b60d2"
+  (hash (AVInstrumentId usdcx)).value === "b94d880aad801667d6745f1f17bf0b005e8ebc7ec1d99e0198fa666398a8c3f1"
+  let values = TM.fromList
+        [ ("instrument", AVInstrumentId usdcx)
+        , ("price", AVDecimal 1.0001)
+        , ("registry", AVParty registry)
+        ]
+  (hash (AVMap values)).value === "336260e794b4e16f85d72ca64a6adcffbdae3f333c69f4927bedfd4ab99c8dea"
 
 -- | A flat map of one value of every scalar type, including negatives.
 testGoldenFlat : Script ()

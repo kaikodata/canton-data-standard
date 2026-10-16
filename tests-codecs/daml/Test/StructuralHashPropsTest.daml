@@ -19,7 +19,7 @@ import Daml.Script
 import DataStandard.Codecs.StructuralHash
   ( Hash, Hashable(hash), epoch, hashRecord, hashText, hashUpgradedRecord
   , hashUpgradedVariant, hashVariant )
-import DataStandard.Utils (AnyValue(..))
+import DataStandard.Utils (AnyValue(..), InstrumentId(..))
 
 expectNe : Text -> Hash -> Hash -> Script ()
 expectNe label a b = assertMsg label (a /= b)
@@ -47,6 +47,19 @@ testTaggedAnyValuesAreDistinct = do
   expectNe "time vs int" (hash (AVTime epoch)) (hash (AVInt 0))
   expectNe "decimal vs text" (hash (AVDecimal 1.5)) (hash (AVText "1.5"))
   expectNe "list vs map" (hash (AVList [])) (hash (AVMap TM.empty))
+
+-- | The two identifier constructors carry the same leaves as text and a list,
+-- so they too are told apart only by their tags.
+testTaggedIdentifiersAreDistinct : Script ()
+testTaggedIdentifiersAreDistinct = do
+  registry <- allocateParty "Registry"
+  let usdcx = InstrumentId with admin = registry, id = "USDCx"
+  hash registry === hash (partyToText registry)
+  expectNe "party vs text" (hash (AVParty registry)) (hash (AVText (partyToText registry)))
+  hash usdcx === hash [partyToText registry, "USDCx"]
+  expectNe "instrumentId vs list"
+    (hash (AVInstrumentId usdcx))
+    (hash (AVList [AVText (partyToText registry), AVText "USDCx"]))
 
 -- | The two tagged probes pinned in the vector contract, kept beside the
 -- separation property so the fix is anchored to values and not only to an
