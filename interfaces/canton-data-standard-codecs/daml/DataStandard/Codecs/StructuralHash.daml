@@ -6,8 +6,8 @@
 --
 -- The combinators are the `Splice.Amulet.CryptoHash` scheme, ported unchanged.
 -- On top of them this module adds what the standard needs and upstream does not
--- define: a type-tagged `AnyValue` instance, plus `Bool`, `Time` and `TextMap`
--- instances.
+-- define: a type-tagged `AnyValue` instance, plus `Bool`, `Time`, `TextMap`
+-- and `InstrumentId` instances.
 --
 -- The scheme in full: `hash(text)` is the lowercase-hex SHA-256 of the text's
 -- UTF-8 bytes; a list hashes as `sha256("N|h1|...|hN")`; a variant hashes as
@@ -41,7 +41,7 @@ import DA.TextMap (TextMap)
 import qualified DA.TextMap as TM
 import DA.Time (convertRelTimeToMicroseconds, subTime, time)
 
-import DataStandard.Utils (AnyValue(..))
+import DataStandard.Utils (AnyValue(..), InstrumentId(..))
 
 -- | A structural hash: the lowercase-hex SHA-256 at the root of a value's hash
 -- tree, wrapped so it cannot be confused with the text it was computed over.
@@ -168,6 +168,11 @@ hashTextMapWith hashVal m =
 instance Hashable a => Hashable (TextMap a) where
   hash = hashTextMapWith hash
 
+-- | A record of its two fields in declaration order, `admin` then `id`, as the
+-- token standard declares them.
+instance Hashable InstrumentId where
+  hash i = hashRecord [hash i.admin, hash i.id]
+
 -- Every AnyValue node routes through hashVariant with a neutral tag. Without the
 -- tags the scheme is not injective across constructors: the untagged forms of
 -- AVInt 1 and AVText "1", of AVBool True and AVText "true", of AVTime epoch and
@@ -183,3 +188,5 @@ instance Hashable AnyValue where
   hash (AVText s)    = hashVariant "text"    [hash s]
   hash (AVList xs)   = hashVariant "list"    [hash xs]
   hash (AVMap m)     = hashVariant "map"     [hash m]
+  hash (AVParty p)   = hashVariant "party"   [hash p]
+  hash (AVInstrumentId i) = hashVariant "instrumentId" [hash i]

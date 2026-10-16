@@ -1,10 +1,14 @@
 sdk-version: 3.4.11
 name: canton-data-standard-utils-v1
 source: daml
-version: 0.2.0
+version: 0.3.0
 dependencies:
   - daml-prim
   - daml-stdlib
+# The last released version. `dpm build` rejects this package if it is not a
+# smart-contract upgrade of it, and `make upgrade-check` runs the participant
+# checks too. Move it to the new release's DAR when tagging one.
+upgrades: ../../upgrade-baselines/canton-data-standard-utils-v1-0.2.0.dar
 build-options:
   - --ghc-option=-Wunused-binds
   - --ghc-option=-Wunused-matches
