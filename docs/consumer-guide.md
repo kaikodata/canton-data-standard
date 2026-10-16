@@ -10,8 +10,8 @@ from any distributor:
 
 ```yaml
 data-dependencies:
-  - <path-to>/canton-data-standard-utils-v1-0.2.0.dar
-  - <path-to>/canton-data-standard-datapoint-v1-0.2.0.dar
+  - <path-to>/canton-data-standard-utils-v1-0.3.0.dar
+  - <path-to>/canton-data-standard-datapoint-v1-0.3.0.dar
 ```
 
 Take the DARs from [`dars/`](../dars) or from a tagged release, or build them

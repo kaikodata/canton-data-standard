@@ -7,7 +7,7 @@
 DAR_GLOB := interfaces/*/.daml/dist/*.dar
 DAML_PKGS := $(shell find interfaces examples tests-fixtures tests tests-codecs tests-crypto -name daml.yaml -not -path '*/.daml/*' -exec dirname {} \;)
 
-.PHONY: build test validate lint headers-check clean ci dars dars-check
+.PHONY: build test validate lint headers-check clean ci dars dars-check upgrade-check
 
 build:
 	dpm build --all
@@ -69,7 +69,20 @@ dars-check:
 	  fi; \
 	done
 
+# Prove each data package is a smart-contract upgrade of its last release, with
+# both the compiler and the participant checks. The baselines live outside
+# dars/ because they are released artifacts, not ones this tree builds. A
+# package without a baseline (the interfaces, which never upgrade in place) is
+# not checked.
+upgrade-check:
+	@set -e; for base in upgrade-baselines/*.dar; do \
+	  pkg=$$(basename "$$base" | sed -E 's/-[0-9]+\.[0-9]+\.[0-9]+\.dar$$//'); \
+	  built=$$(ls interfaces/$$pkg/.daml/dist/$$pkg-*.dar); \
+	  echo "upgrade-check: $$built against $$base"; \
+	  dpm upgrade-check --both "$$base" "$$built"; \
+	done
+
 clean:
 	dpm clean --all
 
-ci: headers-check build validate test dars-check
+ci: headers-check build validate upgrade-check test dars-check

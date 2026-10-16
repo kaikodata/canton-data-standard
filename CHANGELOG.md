@@ -3,6 +3,37 @@
 Notable changes to the Canton Data Standard packages, newest first. All packages
 share one version line while the standard is pre-release.
 
+## [0.3.0]
+
+### Added
+
+- `canton-data-standard-utils-v1` — `AnyValue` gains `AVParty` and
+  `AVInstrumentId`, with `ToAnyValue`/`FromAnyValue` instances, so a payload can
+  carry a party and an instrument id through `insertField`/`lookupField`. The
+  new `InstrumentId` record mirrors the token standard's
+  `Splice.Api.Token.HoldingV2.InstrumentId` (`admin`, `id`) without importing
+  it.
+- `canton-data-standard-codecs` — structural hash tags `party` (the full party
+  id text) and `instrumentId` (the record `admin`, `id`), pinned by new golden
+  vectors. Off-ledger signers must implement both tags before emitting either
+  value.
+- `make upgrade-check`, part of `make ci`: utils-v1 is checked as a
+  smart-contract upgrade of its last release, kept in `upgrade-baselines/`.
+
+### Changed
+
+- `canton-data-standard-datapoint-v1` 0.3.0 is rebuilt against utils-v1 0.3.0,
+  so `PublishedDataPoint` has a new package id, and an interface's package id is
+  its identity. A consumer on 0.2.0 cannot fetch a data point from a producer on
+  0.3.0, even one whose payload uses none of the new values: **producers and
+  consumers must move to 0.3.0 together.** This is a breaking interface change
+  taken as a version bump rather than a `-v2` package because the standard is
+  still pre-release.
+- `canton-data-standard-distributor-key-v1` moves to 0.3.0 with the rest of the
+  version line. Its source is unchanged, but the version is part of the package
+  id, so `DistributorKey` gets a new identity: distributors must re-publish and
+  re-disclose their key contracts under 0.3.0 for consumers on codecs 0.3.0.
+
 ## [0.2.0]
 
 ### Interfaces

@@ -1,25 +1,25 @@
 sdk-version: 3.4.11
 name: canton-data-standard-tests
 source: daml
-version: 0.2.0
+version: 0.3.0
 dependencies:
   - daml-prim
   - daml-stdlib
   - daml-script
 data-dependencies:
-  - ../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.2.0.dar
-  - ../interfaces/canton-data-standard-datapoint-v1/.daml/dist/canton-data-standard-datapoint-v1-0.2.0.dar
-  - ../interfaces/canton-data-standard-codecs/.daml/dist/canton-data-standard-codecs-0.2.0.dar
-  - ../interfaces/canton-data-standard-distributor-key-v1/.daml/dist/canton-data-standard-distributor-key-v1-0.2.0.dar
-  - ../tests-fixtures/.daml/dist/canton-data-standard-tests-fixtures-0.2.0.dar
-  - ../examples/datapoint-producer/.daml/dist/datapoint-producer-example-0.2.0.dar
-  - ../examples/datapoint-consumer/.daml/dist/datapoint-consumer-example-0.2.0.dar
-  - ../examples/quote-producer/.daml/dist/quote-producer-example-0.2.0.dar
-  - ../examples/quote-consumer/.daml/dist/quote-consumer-example-0.2.0.dar
-  - ../examples/switching-distributor-direct/.daml/dist/switching-distributor-direct-example-0.2.0.dar
-  - ../examples/switching-distributor-marketmaker/.daml/dist/switching-distributor-marketmaker-example-0.2.0.dar
-  - ../examples/switching-consumer/.daml/dist/switching-consumer-example-0.2.0.dar
-  - ../examples/distributor-key-producer/.daml/dist/distributor-key-producer-example-0.2.0.dar
+  - ../interfaces/canton-data-standard-utils-v1/.daml/dist/canton-data-standard-utils-v1-0.3.0.dar
+  - ../interfaces/canton-data-standard-datapoint-v1/.daml/dist/canton-data-standard-datapoint-v1-0.3.0.dar
+  - ../interfaces/canton-data-standard-codecs/.daml/dist/canton-data-standard-codecs-0.3.0.dar
+  - ../interfaces/canton-data-standard-distributor-key-v1/.daml/dist/canton-data-standard-distributor-key-v1-0.3.0.dar
+  - ../tests-fixtures/.daml/dist/canton-data-standard-tests-fixtures-0.3.0.dar
+  - ../examples/datapoint-producer/.daml/dist/datapoint-producer-example-0.3.0.dar
+  - ../examples/datapoint-consumer/.daml/dist/datapoint-consumer-example-0.3.0.dar
+  - ../examples/quote-producer/.daml/dist/quote-producer-example-0.3.0.dar
+  - ../examples/quote-consumer/.daml/dist/quote-consumer-example-0.3.0.dar
+  - ../examples/switching-distributor-direct/.daml/dist/switching-distributor-direct-example-0.3.0.dar
+  - ../examples/switching-distributor-marketmaker/.daml/dist/switching-distributor-marketmaker-example-0.3.0.dar
+  - ../examples/switching-consumer/.daml/dist/switching-consumer-example-0.3.0.dar
+  - ../examples/distributor-key-producer/.daml/dist/distributor-key-producer-example-0.3.0.dar
 build-options:
   - --ghc-option=-Wunused-binds
   - --ghc-option=-Wunused-matches

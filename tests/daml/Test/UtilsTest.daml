@@ -63,3 +63,25 @@ testListReadAsScalarIsNone : Script ()
 testListReadAsScalarIsNone = do
   let vs = insertField "xs" ([1, 2, 3] : [Int]) TM.empty
   (lookupField "xs" vs : Optional Int) === None
+
+testPartyAndInstrumentIdRoundTrip : Script ()
+testPartyAndInstrumentIdRoundTrip = do
+  registry <- allocateParty "Registry"
+  let usdcx = InstrumentId with admin = registry, id = "USDCx"
+  let vs = insertField "registry" registry
+         $ insertField "instrument" usdcx TM.empty
+  lookupField "registry" vs === Some registry
+  lookupField "instrument" vs === Some usdcx
+  (lookupField "instruments" (insertField "instruments" [usdcx] TM.empty) : Optional [InstrumentId])
+    === Some [usdcx]
+
+testPartyAndInstrumentIdWrongTypeIsNone : Script ()
+testPartyAndInstrumentIdWrongTypeIsNone = do
+  registry <- allocateParty "Registry"
+  let usdcx = InstrumentId with admin = registry, id = "USDCx"
+  let vs = insertField "registry" registry
+         $ insertField "instrument" usdcx
+         $ insertField "registryText" (partyToText registry) TM.empty
+  (lookupField "registry" vs : Optional Text) === None
+  (lookupField "instrument" vs : Optional Party) === None
+  (lookupField "registryText" vs : Optional Party) === None
