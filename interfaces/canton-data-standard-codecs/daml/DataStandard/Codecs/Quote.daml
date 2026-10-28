@@ -35,11 +35,17 @@ data Quote = Quote with
     feedId : Text
       -- ^ The price feed, for example "BTC/USD".
     price : Decimal
-      -- ^ The quoted price, as an exact base-10 fixed-point number.
+      -- ^ The quoted price, as an exact base-10 fixed-point number. It is a
+      -- reference price with no trade size attached — not a price executable
+      -- at any given size. The distributor documents how it is derived (a mid,
+      -- a last trade, an index) in the publication's `metadata`.
     priceTime : Time
-      -- ^ The "as of" instant: the market time the price is observed for. Set
-      -- it equal to the publication's `publishedAt` for a feed with no distinct
-      -- observation time.
+      -- ^ The "as of" instant: the market time the price is observed for. For
+      -- a price derived from a pool or an order book, it is the time of the
+      -- last trade or book change the price reflects, not the time the
+      -- distributor read it, so that a market that has stopped trading ages
+      -- like one. Set it equal to the publication's `publishedAt` only for a
+      -- feed with no distinct observation time.
   deriving (Eq, Show)
 
 -- | The `schemaVersion` a quote-shaped payload carries, on a published data

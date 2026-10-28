@@ -282,6 +282,24 @@ testQuoteConsumerRejectsStaleQuote = do
   Some disc <- queryDisclosure oracle quoteCid
   submitFailsWith buyer disc (exerciseCmd offerCid AcceptQuoteTrade) "quote too stale"
 
+-- The quote consumer rejects a fresh publication of a market that has stopped:
+-- published now, but pricing a pool that last changed thirteen hours ago.
+testQuoteConsumerRejectsStoppedMarket : Script ()
+testQuoteConsumerRejectsStoppedMarket = do
+  oracle  <- allocateParty "ExampleOracle"
+  seller  <- allocateParty "Seller"
+  buyer   <- allocateParty "Buyer"
+  now     <- getTime
+  quoteCid <- submit oracle $ createCmd PriceQuote with
+    oracle, feedId = "BTC/USD", price = 65000.0
+    priceTime = addRelTime now (hours (-13)), publishedAt = now
+  offerCid <- submit seller $ createCmd QuoteTradeOffer with
+    seller, buyer, feedId = "BTC/USD", quantity = 0.5
+    expectedDistributor = oracle, maxQuoteAge = hours 1
+    quoteCid = toInterfaceContractId @PublishedDataPoint quoteCid
+  Some disc <- queryDisclosure oracle quoteCid
+  submitFailsWith buyer disc (exerciseCmd offerCid AcceptQuoteTrade) "price too stale"
+
 -- The data-point consumer rejects a publication stamped in the future, so that a
 -- negative age cannot read as fresh.
 testDataConsumerRejectsFutureDatedData : Script ()

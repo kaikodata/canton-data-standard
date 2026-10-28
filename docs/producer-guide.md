@@ -125,9 +125,21 @@ interface instance PublishedDataPoint for PriceQuote where
     metadata      = emptyMetadata
 ```
 
+`price` is a reference price with no trade size attached: it says nothing about
+what a trade of a given size would fill at, and on a thin venue the two can be
+far apart. Document how you derive it — a mid, a last trade, an index, which
+venues — as a `metadata` entry, so a consumer knows what it is valuing against.
+A price executable at a given size is a different datum and belongs under a
+schema of its own.
+
 `priceTime` is the market instant the price is observed for; `publishedAt` is
 when you produced the quote, and a quote can be produced after the instant it
-prices. A consumer reads the payload back with `valuesToQuote`, which is strict:
+prices. For a price you derive from an AMM pool or an order book, `priceTime`
+is the time of the last trade or book change the price reflects, not the time
+you read it. A pool that stopped trading thirteen hours ago still quotes, and
+reading it now gives a correct price for a market that has not moved since;
+stamping it with the read time would make it look fresh. Consumers bound the age
+of `priceTime`, so the honest timestamp is what lets them reject it. A consumer reads the payload back with `valuesToQuote`, which is strict:
 exactly the three fields, each at its expected type, so a payload carrying
 anything else is not a quote. If your feed has more to say than a quote's three
 fields, publish it under a schema of your own rather than extending this one.
