@@ -219,6 +219,22 @@ testStaleQuoteRejected = do
     (exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig)
     "quote too stale"
 
+-- A payload signed just now, but pricing a market that last changed thirteen
+-- hours ago: fresh by `publishedAt`, stale by `priceTime`.
+testStoppedMarketRejected : Script ()
+testStoppedMarketRejected = do
+  f <- setupExample
+  now <- getTime
+  let payload = signedQuote now (addRelTime now (hours 1)) Quote with
+        feedId = "BTC/USD"
+        price = 65000.0
+        priceTime = addRelTime now (hours (-13))
+  sig <- signQuote f.keyPair.privateKey payload
+  offerCid <- createOfferFor f "BTC/USD" f.distributor (hours 1)
+  submitFailsWith f.buyer f.disc
+    (exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig)
+    "price too stale"
+
 -- The library's message, propagated out of the consumer's choice: a tampered price
 -- leaves the signature valid DER but bound to a different payload.
 testTamperedPriceRejectedWithLibraryMessage : Script ()

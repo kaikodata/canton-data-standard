@@ -31,8 +31,9 @@ template QuoteTradeOffer
       -- the publication's `distributor` authentic; trusting that party is the
       -- consumer's decision, so the buyer pins it here.
     maxQuoteAge : RelTime
-      -- ^ The largest age, now minus `publishedAt`, the buyer will settle on. A
-      -- pushed quote has no replay bound of its own.
+      -- ^ The largest age, now minus `publishedAt` and now minus the quote's
+      -- `priceTime`, the buyer will settle on. A pushed quote has no replay
+      -- bound of its own, and a fresh publication can price a stopped market.
     quoteCid : ContractId PublishedDataPoint
       -- ^ Any `PublishedDataPoint` publication, identified through the interface
       -- rather than a concrete template. It must carry the quote schema, which
@@ -55,6 +56,7 @@ template QuoteTradeOffer
         assertMsg "untrusted distributor" (v.distributor == expectedDistributor)
         assertMsg "quote published in the future" (v.publishedAt <= now)
         assertMsg "quote too stale" (subTime now v.publishedAt <= maxQuoteAge)
+        assertMsg "price too stale" (subTime now quote.priceTime <= maxQuoteAge)
         create QuoteTradeSettlement with
           seller, buyer, feedId, quantity
           price       = quote.price

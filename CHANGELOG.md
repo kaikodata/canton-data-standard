@@ -33,6 +33,16 @@ share one version line while the standard is pre-release.
   version line. Its source is unchanged, but the version is part of the package
   id, so `DistributorKey` gets a new identity: distributors must re-publish and
   re-disclose their key contracts under 0.3.0 for consumers on codecs 0.3.0.
+- `quote-1` semantics clarified, with no change to its fields
+  ([#18](https://github.com/kaikodata/canton-data-standard/issues/18)): `price`
+  is a reference price with no trade size attached, derived by a methodology
+  the distributor documents in `metadata`; a price executable at a given size
+  belongs under a schema of its own. For a price derived from a pool or an order
+  book, `priceTime` is the time of the last trade or book change the price
+  reflects, not the time the distributor read it.
+- `quote-consumer` and `distributor-key-consumer` bound the age of the quote's
+  `priceTime` as well as `publishedAt` (`"price too stale"`), so a fresh
+  publication of a market that has stopped trading is rejected.
 
 ## [0.2.0]
 

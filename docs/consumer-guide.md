@@ -90,8 +90,10 @@ signed the contract and cannot be forged. Everything else is your decision.
   feed. The field is authentic, but the publication is often chosen by your
   counterparty rather than by you.
 - **Feed identity.** Verify the payload describes the feed you expect.
-- **Staleness.** Bound the age of `publishedAt`. The reference consumers do
-  this with a `maxQuoteAge` gate rather than leaving it to prose.
+- **Staleness.** Bound the age of `publishedAt`, and for a quote the age of
+  `priceTime` too: a fresh publication can carry the price of a market that
+  stopped trading hours ago. The reference consumers do this with a
+  `maxQuoteAge` gate rather than leaving it to prose.
 - **Schema.** Handle `None` from `lookupField`, and gate on `schemaVersion` if
   you support several distributor schemas.
 
@@ -121,7 +123,15 @@ assertMsg "feed mismatch" (quote.feedId == feedId)
 `quote.price` is a `Decimal` you read directly, and the decode is your schema
 gate: it is strict — exactly the three fields, each at its expected type — so a
 payload that is not a quote is rejected rather than half-read. The checks below
-still apply. The full consumer is
+still apply.
+
+`quote.price` is a reference price with no trade size attached — not what a
+trade of your size would fill at. On a thin venue the gap between a small and a
+large trade can be tens of percent, so if you value or liquidate positions
+against it, read the distributor's documented methodology in `metadata` and
+size your margins accordingly. `quote.priceTime` is the time of the last market
+change the price reflects, so bound its age as well as `publishedAt`'s: that
+check is what catches a pool that still quotes but has stopped trading. The full consumer is
 [`examples/quote-consumer`](../examples/quote-consumer).
 
 `Quote` comes from the codecs package, which is a utility package, so it is not
