@@ -42,7 +42,8 @@ template SignedQuoteTradeOffer
       -- the reported `distributor` authentic; trusting that party is the
       -- consumer's decision.
     maxQuoteAge : RelTime
-      -- ^ The largest age, now minus `publishedAt`, the buyer will settle on.
+      -- ^ The largest age, now minus `publishedAt` and now minus the quote's
+      -- `priceTime`, the buyer will settle on.
       -- The signed `expiresAt` is the standard's only replay bound; this is the
       -- consumer's tighter policy on top of it.
     keyCid : ContractId DistributorKey
@@ -79,6 +80,7 @@ template SignedQuoteTradeOffer
             assertMsg "feed mismatch" (quote.feedId == feedId)
             assertMsg "quote published in the future" (v.publishedAt <= now)
             assertMsg "quote too stale" (subTime now v.publishedAt <= maxQuoteAge)
+            assertMsg "price too stale" (subTime now quote.priceTime <= maxQuoteAge)
             create SignedQuoteTradeSettlement with
               seller, buyer, feedId, quantity
               price = quote.price
