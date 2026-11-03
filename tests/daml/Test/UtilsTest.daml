@@ -5,6 +5,7 @@
 module Test.UtilsTest where
 
 import DA.Assert ((===))
+import DA.Date (Month(Nov), date)
 import DA.TextMap (TextMap)
 import qualified DA.TextMap as TM
 import Daml.Script
@@ -85,3 +86,22 @@ testPartyAndInstrumentIdWrongTypeIsNone = do
   (lookupField "registry" vs : Optional Text) === None
   (lookupField "instrument" vs : Optional Party) === None
   (lookupField "registryText" vs : Optional Party) === None
+
+testDateRoundTrip : Script ()
+testDateRoundTrip = do
+  let maturity = date 2035 Nov 15
+  let vs = insertField "maturityDate" maturity TM.empty
+  lookupField "maturityDate" vs === Some maturity
+  (lookupField "dates" (insertField "dates" [maturity] TM.empty) : Optional [Date])
+    === Some [maturity]
+
+-- | A date and a time are distinct tags: a date is never read as a time at
+-- midnight, nor a time truncated to its date.
+testDateAndTimeAreNotInterchangeable : Script ()
+testDateAndTimeAreNotInterchangeable = do
+  now <- getTime
+  let vs = insertField "maturityDate" (date 2035 Nov 15)
+         $ insertField "ts" now TM.empty
+  (lookupField "maturityDate" vs : Optional Time) === None
+  (lookupField "ts" vs : Optional Date) === None
+  (lookupField "ts" vs : Optional Time) === Some now

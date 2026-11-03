@@ -12,6 +12,7 @@
 module Test.StructuralHashPropsTest where
 
 import DA.Assert ((===))
+import DA.Date (Month(Jan), date)
 import DA.TextMap (TextMap)
 import qualified DA.TextMap as TM
 import Daml.Script
@@ -25,7 +26,7 @@ expectNe : Text -> Hash -> Hash -> Script ()
 expectNe label a b = assertMsg label (a /= b)
 
 -- | The hazard the tags exist to fix. Hashed bare, a value's type leaves no trace
--- in its hash, so five pairs of differently-typed values are indistinguishable.
+-- in its hash, so six pairs of differently-typed values are indistinguishable.
 -- These assertions are equalities on purpose. They document the collision the
 -- tagged instance must separate, and they would start failing if the scalar
 -- renderings ever changed underneath.
@@ -34,17 +35,20 @@ testUntaggedScalarsCollide = do
   hash (1 : Int) === hash ("1" : Text)
   hash True === hash ("true" : Text)
   hash epoch === hash (0 : Int)
+  hash (date 1970 Jan 1) === hash (0 : Int)
   hash (1.5 : Decimal) === hash ("1.5" : Text)
   hash ([] : [Int]) === hash (TM.empty : TextMap Int)
 
 -- | The fix: routing every `AnyValue` node through `hashVariant` with its
--- constructor tag separates all five colliding pairs. Without this, a distributor's
+-- constructor tag separates all six colliding pairs. Without this, a distributor's
 -- signature over the integer 1 would also be a valid signature over the text "1".
 testTaggedAnyValuesAreDistinct : Script ()
 testTaggedAnyValuesAreDistinct = do
   expectNe "int vs text" (hash (AVInt 1)) (hash (AVText "1"))
   expectNe "bool vs text" (hash (AVBool True)) (hash (AVText "true"))
   expectNe "time vs int" (hash (AVTime epoch)) (hash (AVInt 0))
+  expectNe "date vs int" (hash (AVDate (date 1970 Jan 1))) (hash (AVInt 0))
+  expectNe "date vs time" (hash (AVDate (date 1970 Jan 1))) (hash (AVTime epoch))
   expectNe "decimal vs text" (hash (AVDecimal 1.5)) (hash (AVText "1.5"))
   expectNe "list vs map" (hash (AVList [])) (hash (AVMap TM.empty))
 

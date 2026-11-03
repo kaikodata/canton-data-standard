@@ -57,9 +57,13 @@ The full producer is [`examples/datapoint-producer`](../examples/datapoint-produ
 ## The `values` payload
 
 `Values` maps field names to `AnyValue`: the scalars `Int`, `Decimal`, `Text`,
-`Time`, `Bool`, the identifiers `Party` and `InstrumentId`, plus an ordered list
-and a string-keyed map. Lists and maps nest, so a structured payload such as an
-index's constituents is expressible.
+`Time`, `Date`, `Bool`, the identifiers `Party` and `InstrumentId`, plus an
+ordered list and a string-keyed map. Lists and maps nest, so a structured
+payload such as an index's constituents is expressible.
+
+Carry a field your source gives as a calendar date, such as a bond's maturity
+date or an index level's date, as a `Date` rather than as a `Time` at midnight
+UTC: a `Time` asserts a time of day and a zone the source never stated.
 
 `InstrumentId` mirrors the token standard's `Splice.Api.Token.HoldingV2`
 `InstrumentId` (`admin : Party`, `id : Text`) field for field, so a payload can
