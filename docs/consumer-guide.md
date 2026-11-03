@@ -132,8 +132,10 @@ still apply.
 `quote.price` is a reference price with no trade size attached — not what a
 trade of your size would fill at. On a thin venue the gap between a small and a
 large trade can be tens of percent, so if you value or liquidate positions
-against it, read the distributor's documented methodology in `metadata` and
-size your margins accordingly. `quote.priceTime` is the time of the last market
+against it, read the distributor's documented methodology and size your
+margins accordingly. On the push path that methodology is in `metadata`; a
+signed quote on the pull path carries none (see
+[Reading pulled, signed data](#reading-pulled-signed-data)). `quote.priceTime` is the time of the last market
 change the price reflects, so bound its age as well as `publishedAt`'s, each
 with its own limit: that check is what catches a pool that still quotes but has
 stopped trading. The full consumer is
@@ -208,6 +210,13 @@ authenticated.
 Right v <- pure (verifyDataPoint kv now payload signature)
 Right quote <- pure (verifiedQuote v)   -- quote : Quote
 ```
+
+A signed payload carries no `metadata`: `SignedDataPoint` holds `publishedAt`,
+`expiresAt`, `schemaVersion` and `values` only, and `VerifiedDataPoint` leaves
+`metadata` out on purpose, because it is not signed. The standard therefore
+defines no channel on the pull path for how a quote's `price` is derived. Get the
+methodology from the distributor out of band, from its key or feed
+documentation, before you value or liquidate positions against the price.
 
 Your own checks — feed, staleness, price bounds — stay yours, as on the push
 path; `expiresAt` is the standard's only replay bound, so apply a tighter policy

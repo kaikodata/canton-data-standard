@@ -37,8 +37,11 @@ data Quote = Quote with
     price : Decimal
       -- ^ The quoted price, as an exact base-10 fixed-point number. It is a
       -- reference price with no trade size attached — not a price executable
-      -- at any given size. The distributor documents how it is derived (a mid,
-      -- a last trade, an index) in the publication's `metadata`.
+      -- at any given size. On the push path the distributor documents how it
+      -- is derived (a mid, a last trade, an index) in the publication's
+      -- `metadata`. A signed payload carries no `metadata`, so the standard
+      -- defines no methodology channel on the pull path: there the distributor
+      -- documents it out of band, next to its key or feed documentation.
     priceTime : Time
       -- ^ The "as of" instant: the market time the price is observed for. For
       -- a price derived from a pool or an order book, it is the time of the

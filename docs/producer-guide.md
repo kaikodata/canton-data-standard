@@ -129,6 +129,8 @@ interface instance PublishedDataPoint for PriceQuote where
 what a trade of a given size would fill at, and on a thin venue the two can be
 far apart. Document how you derive it — a mid, a last trade, an index, which
 venues — as a `metadata` entry, so a consumer knows what it is valuing against.
+On the pull path there is no `metadata` to put it in; see
+[The pull path](#the-pull-path).
 A price executable at a given size is a different datum and belongs under a
 schema of its own.
 
@@ -201,6 +203,13 @@ off-ledger signer needs only SHA-256, lowercase hex, string joins and the scalar
 rendering rules; the signature itself is ECDSA over the SHA-256 of the root
 hash's decoded bytes. The golden vectors in `tests-codecs` are the normative
 record of the scheme.
+
+A `SignedDataPoint` carries `publishedAt`, `expiresAt`, `schemaVersion` and
+`values` only. There is no `metadata`, because it is not signed, so the standard
+defines no channel on the pull path for how a price is derived. If you sign
+quotes, document the methodology out of band, next to your key or feed
+documentation, so a consumer valuing against your `price` knows whether it is a
+mid, a last trade or an index.
 
 The standard defines no on-ledger verification choice: a consumer calls
 `verifyDataPoint` from its own choice against your disclosed
