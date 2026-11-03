@@ -92,8 +92,12 @@ signed the contract and cannot be forged. Everything else is your decision.
 - **Feed identity.** Verify the payload describes the feed you expect.
 - **Staleness.** Bound the age of `publishedAt`, and for a quote the age of
   `priceTime` too: a fresh publication can carry the price of a market that
-  stopped trading hours ago. The reference consumers do this with a
-  `maxQuoteAge` gate rather than leaving it to prose.
+  stopped trading hours ago. Give the two ages separate bounds, since you may
+  want a quote published in the last minute yet still accept a market that last
+  traded half an hour ago. Reject a `publishedAt` in the future and a
+  `priceTime` after `publishedAt`, so that a negative age cannot read as fresh.
+  The reference consumers do this with `maxQuoteAge` and `maxPriceAge` gates
+  rather than leaving it to prose.
 - **Schema.** Handle `None` from `lookupField`, and gate on `schemaVersion` if
   you support several distributor schemas.
 
@@ -130,8 +134,9 @@ trade of your size would fill at. On a thin venue the gap between a small and a
 large trade can be tens of percent, so if you value or liquidate positions
 against it, read the distributor's documented methodology in `metadata` and
 size your margins accordingly. `quote.priceTime` is the time of the last market
-change the price reflects, so bound its age as well as `publishedAt`'s: that
-check is what catches a pool that still quotes but has stopped trading. The full consumer is
+change the price reflects, so bound its age as well as `publishedAt`'s, each
+with its own limit: that check is what catches a pool that still quotes but has
+stopped trading. The full consumer is
 [`examples/quote-consumer`](../examples/quote-consumer).
 
 `Quote` comes from the codecs package, which is a utility package, so it is not

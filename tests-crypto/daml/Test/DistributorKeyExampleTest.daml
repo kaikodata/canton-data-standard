@@ -75,10 +75,10 @@ signQuote privateKey payload =
 -- | An offer from the fixture's seller to its buyer, pinning the fixture's
 -- distributor and key.
 createOffer : ExampleFixture -> Script (ContractId SignedQuoteTradeOffer)
-createOffer f = createOfferFor f "BTC/USD" f.distributor (hours 1)
+createOffer f = createOfferFor f "BTC/USD" f.distributor (hours 1) (hours 1)
 
-createOfferFor : ExampleFixture -> Text -> Party -> RelTime -> Script (ContractId SignedQuoteTradeOffer)
-createOfferFor f feedId expectedDistributor maxQuoteAge =
+createOfferFor : ExampleFixture -> Text -> Party -> RelTime -> RelTime -> Script (ContractId SignedQuoteTradeOffer)
+createOfferFor f feedId expectedDistributor maxQuoteAge maxPriceAge =
   submit f.seller $ createCmd SignedQuoteTradeOffer with
     seller = f.seller
     buyer = f.buyer
@@ -86,6 +86,7 @@ createOfferFor f feedId expectedDistributor maxQuoteAge =
     quantity = 0.5
     expectedDistributor
     maxQuoteAge
+    maxPriceAge
     keyCid = f.keyIf
 
 -- The whole flow: sign off-ledger, verify through the library inside the consumer's
@@ -169,6 +170,7 @@ testRotationRetiresTheOldKey = do
     quantity = 0.5
     expectedDistributor = f.distributor
     maxQuoteAge = hours 1
+    maxPriceAge = hours 1
     keyCid = toInterfaceContractId @DistributorKey newKeyTpl
   settlementCid <- submit (actAs f.buyer <> disclose newDisc) $
     exerciseCmd newOffer AcceptSignedQuoteTrade with payload, signature = newSig
@@ -184,7 +186,7 @@ testUntrustedDistributorRejected = do
   now <- getTime
   let payload = livePayload now
   sig <- signQuote f.keyPair.privateKey payload
-  offerCid <- createOfferFor f "BTC/USD" other (hours 1)
+  offerCid <- createOfferFor f "BTC/USD" other (hours 1) (hours 1)
   submitFailsWith f.buyer f.disc
     (exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig)
     "untrusted distributor"
@@ -197,7 +199,7 @@ testFeedMismatchRejected = do
   now <- getTime
   let payload = livePayload now
   sig <- signQuote f.keyPair.privateKey payload
-  offerCid <- createOfferFor f "ETH/USD" f.distributor (hours 1)
+  offerCid <- createOfferFor f "ETH/USD" f.distributor (hours 1) (hours 1)
   submitFailsWith f.buyer f.disc
     (exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig)
     "feed mismatch"
@@ -214,7 +216,7 @@ testStaleQuoteRejected = do
         price = 65000.0
         priceTime = producedAt
   sig <- signQuote f.keyPair.privateKey payload
-  offerCid <- createOfferFor f "BTC/USD" f.distributor (hours 1)
+  offerCid <- createOfferFor f "BTC/USD" f.distributor (hours 1) (hours 1)
   submitFailsWith f.buyer f.disc
     (exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig)
     "quote too stale"
@@ -230,10 +232,44 @@ testStoppedMarketRejected = do
         price = 65000.0
         priceTime = addRelTime now (hours (-13))
   sig <- signQuote f.keyPair.privateKey payload
-  offerCid <- createOfferFor f "BTC/USD" f.distributor (hours 1)
+  offerCid <- createOfferFor f "BTC/USD" f.distributor (hours 1) (hours 1)
   submitFailsWith f.buyer f.disc
     (exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig)
     "price too stale"
+
+-- A signed quote that prices an instant after its own publication: rejected,
+-- so that a negative market age cannot read as fresh.
+testPriceTimeAfterPublicationRejected : Script ()
+testPriceTimeAfterPublicationRejected = do
+  f <- setupExample
+  now <- getTime
+  let payload = signedQuote now (addRelTime now (hours 1)) Quote with
+        feedId = "BTC/USD"
+        price = 65000.0
+        priceTime = addRelTime now (minutes 30)
+  sig <- signQuote f.keyPair.privateKey payload
+  offerCid <- createOffer f
+  submitFailsWith f.buyer f.disc
+    (exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig)
+    "price time after publication"
+
+-- The two ages take separate bounds: a payload signed within the last minute
+-- settles although its market last traded half an hour ago.
+testQuietMarketSettles : Script ()
+testQuietMarketSettles = do
+  f <- setupExample
+  now <- getTime
+  let lastTrade = addRelTime now (minutes (-30))
+      payload = signedQuote now (addRelTime now (hours 1)) Quote with
+        feedId = "BTC/USD"
+        price = 65000.0
+        priceTime = lastTrade
+  sig <- signQuote f.keyPair.privateKey payload
+  offerCid <- createOfferFor f "BTC/USD" f.distributor (minutes 1) (hours 1)
+  settlementCid <- submit (actAs f.buyer <> disclose f.disc) $
+    exerciseCmd offerCid AcceptSignedQuoteTrade with payload, signature = sig
+  Some s <- queryContractId f.buyer settlementCid
+  s.priceTime === lastTrade
 
 -- The library's message, propagated out of the consumer's choice: a tampered price
 -- leaves the signature valid DER but bound to a different payload.

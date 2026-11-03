@@ -42,10 +42,13 @@ template SignedQuoteTradeOffer
       -- the reported `distributor` authentic; trusting that party is the
       -- consumer's decision.
     maxQuoteAge : RelTime
-      -- ^ The largest age, now minus `publishedAt` and now minus the quote's
-      -- `priceTime`, the buyer will settle on.
-      -- The signed `expiresAt` is the standard's only replay bound; this is the
-      -- consumer's tighter policy on top of it.
+      -- ^ The largest publication age, now minus `publishedAt`, the buyer will
+      -- settle on. The signed `expiresAt` is the standard's only replay bound;
+      -- this is the consumer's tighter policy on top of it.
+    maxPriceAge : RelTime
+      -- ^ The largest market age, now minus the quote's `priceTime`, the buyer
+      -- will settle on. A fresh publication can price a stopped market, and a
+      -- quiet market can warrant a looser bound than the publication does.
     keyCid : ContractId DistributorKey
       -- ^ The distributor's published key, through the interface. The buyer
       -- obtains it by explicit disclosure when accepting.
@@ -59,8 +62,9 @@ template SignedQuoteTradeOffer
     -- needs. The gates run in order: the key belongs to the pinned distributor,
     -- the payload verifies (codec, window, signature, with the library's
     -- messages propagating unchanged), the authenticated payload decodes as a
-    -- quote, the feed matches, and the quote is neither future-dated nor beyond
-    -- the buyer's staleness policy.
+    -- quote, the feed matches, the quote is not future-dated, it prices no
+    -- instant after its own publication, and neither its publication nor its
+    -- market is older than the buyer's staleness policy.
     choice AcceptSignedQuoteTrade : ContractId SignedQuoteTradeSettlement
       with
         payload : SignedDataPoint
@@ -79,8 +83,9 @@ template SignedQuoteTradeOffer
             quote <- decodeQuote v
             assertMsg "feed mismatch" (quote.feedId == feedId)
             assertMsg "quote published in the future" (v.publishedAt <= now)
+            assertMsg "price time after publication" (quote.priceTime <= v.publishedAt)
             assertMsg "quote too stale" (subTime now v.publishedAt <= maxQuoteAge)
-            assertMsg "price too stale" (subTime now quote.priceTime <= maxQuoteAge)
+            assertMsg "price too stale" (subTime now quote.priceTime <= maxPriceAge)
             create SignedQuoteTradeSettlement with
               seller, buyer, feedId, quantity
               price = quote.price

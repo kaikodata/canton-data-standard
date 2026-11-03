@@ -42,7 +42,11 @@ share one version line while the standard is pre-release.
   reflects, not the time the distributor read it.
 - `quote-consumer` and `distributor-key-consumer` bound the age of the quote's
   `priceTime` as well as `publishedAt` (`"price too stale"`), so a fresh
-  publication of a market that has stopped trading is rejected.
+  publication of a market that has stopped trading is rejected. The market age
+  has its own bound, `maxPriceAge`, beside `maxQuoteAge`, so a buyer can demand
+  a recent publication and still accept a quiet market. A `priceTime` after
+  `publishedAt` is rejected (`"price time after publication"`), so a negative
+  market age cannot read as fresh.
 
 ## [0.2.0]
 
