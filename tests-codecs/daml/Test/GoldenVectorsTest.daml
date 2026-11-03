@@ -14,6 +14,7 @@
 module Test.GoldenVectorsTest where
 
 import DA.Assert ((===))
+import DA.Date (Month(..), date)
 import qualified DA.Text as T
 import qualified DA.TextMap as TM
 import DA.Time (addRelTime, milliseconds)
@@ -21,7 +22,7 @@ import Daml.Script
 
 import DataStandard.Codecs.Envelope (hashSignedDataPoint)
 import DataStandard.Codecs.Quote (Quote(..), quoteSchemaVersion, signedQuote)
-import DataStandard.Codecs.StructuralHash (Hashable(hash), epoch, timeToMillis)
+import DataStandard.Codecs.StructuralHash (Hashable(hash), dateToDays, epoch, timeToMillis)
 import DataStandard.Utils (AnyValue(..), InstrumentId(..), SignedDataPoint(..))
 
 -- | 2026-01-15T12:30:45Z, the envelope vectors' publication instant. Built from
@@ -54,6 +55,9 @@ testShowRenderings = do
   timeToMillis epoch === 0
   timeToMillis t0 === 1768480245000
   timeToMillis t1 === 1768483845000
+  dateToDays (date 1970 Jan 1) === 0
+  dateToDays (date 1969 Dec 31) === -1
+  dateToDays (date 2026 Jan 15) === 20468
 
 -- | The eight tagged scalar vectors, one per `AnyValue` scalar constructor plus
 -- the empty text and the epoch instant.
@@ -92,6 +96,22 @@ testGoldenPartyAndInstrumentId = do
         , ("registry", AVParty registry)
         ]
   (hash (AVMap values)).value === "336260e794b4e16f85d72ca64a6adcffbdae3f333c69f4927bedfd4ab99c8dea"
+
+-- | A date hashes as its integer day count since 1970-01-01 under the `date`
+-- tag, so the epoch date and the day before it pin the zero and negative
+-- renderings. The map vector is the shape of a bond reference-data feed: two
+-- calendar dates the provider gives without a time of day, beside a price.
+testGoldenDate : Script ()
+testGoldenDate = do
+  (hash (AVDate (date 1970 Jan 1))).value === "a2f99be9203bc7f1eb034cfbb27aa7e14d7c5f445e8f7c8919624db2df8f1cfe"
+  (hash (AVDate (date 1969 Dec 31))).value === "cbae3e1b5038b8d8498c4e54087466b4d2e9ac8692a29052130a3e2ae6a046d4"
+  (hash (AVDate (date 2026 Jan 15))).value === "9095b23645cb4d3bd569dc4f120e5879dd9f899f318b7da2e310b166ad720bd1"
+  let values = TM.fromList
+        [ ("exDividendDate", AVDate (date 2026 Mar 13))
+        , ("maturityDate", AVDate (date 2035 Nov 15))
+        , ("price", AVDecimal 98.4375)
+        ]
+  (hash (AVMap values)).value === "56201bbf1f6ba12d521c28e60fa05850c582abf081b2375ae58bdc7f24982788"
 
 -- | A flat map of one value of every scalar type, including negatives.
 testGoldenFlat : Script ()

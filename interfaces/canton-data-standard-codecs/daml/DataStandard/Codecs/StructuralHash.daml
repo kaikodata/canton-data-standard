@@ -6,8 +6,8 @@
 --
 -- The combinators are the `Splice.Amulet.CryptoHash` scheme, ported unchanged.
 -- On top of them this module adds what the standard needs and upstream does not
--- define: a type-tagged `AnyValue` instance, plus `Bool`, `Time`, `TextMap`
--- and `InstrumentId` instances.
+-- define: a type-tagged `AnyValue` instance, plus `Bool`, `Time`, `Date`,
+-- `TextMap` and `InstrumentId` instances.
 --
 -- The scheme in full: `hash(text)` is the lowercase-hex SHA-256 of the text's
 -- UTF-8 bytes; a list hashes as `sha256("N|h1|...|hN")`; a variant hashes as
@@ -32,9 +32,10 @@ module DataStandard.Codecs.StructuralHash
   , Hashable(hash)
   , epoch
   , timeToMillis
+  , dateToDays
   ) where
 
-import DA.Date (Month(Jan), date)
+import DA.Date (Month(Jan), date, subDate)
 import DA.Optional (isNone)
 import qualified DA.Text as T
 import DA.TextMap (TextMap)
@@ -155,6 +156,15 @@ timeToMillis t = convertRelTimeToMicroseconds (subTime t epoch) / 1000
 instance Hashable Time where
   hash = hashText . show . timeToMillis
 
+-- | A date as integer days since 1970-01-01, the rendering the hash commits to:
+-- the same epoch-relative integer form as `Time`, and Daml-LF's own encoding of
+-- a `Date`. A date carries no time of day and no zone, so none is implied.
+dateToDays : Date -> Int
+dateToDays d = subDate d (date 1970 Jan 1)
+
+instance Hashable Date where
+  hash = hashText . show . dateToDays
+
 -- | Hash a `TextMap` under a caller-supplied value hasher: entries in ascending
 -- code-point key order (`DA.TextMap.toList`'s order, which coincides with raw
 -- UTF-8 byte order), each entry a 2-field record of the key hash and the value
@@ -175,9 +185,9 @@ instance Hashable InstrumentId where
 
 -- Every AnyValue node routes through hashVariant with a neutral tag. Without the
 -- tags the scheme is not injective across constructors: the untagged forms of
--- AVInt 1 and AVText "1", of AVBool True and AVText "true", of AVTime epoch and
--- AVInt 0, of AVDecimal 1.5 and AVText "1.5", and of an empty list and an empty
--- map are all pairwise equal. The tags are deliberately decoupled from the Daml
+-- AVInt 1 and AVText "1", of AVBool True and AVText "true", of AVTime epoch,
+-- AVDate 1970-01-01 and AVInt 0, of AVDecimal 1.5 and AVText "1.5", and of an
+-- empty list and an empty map are all pairwise equal. The tags are deliberately decoupled from the Daml
 -- constructor spelling, non-numeric so one can never be read as a list length,
 -- and "|"-free so one cannot shift a field boundary.
 instance Hashable AnyValue where
@@ -190,3 +200,4 @@ instance Hashable AnyValue where
   hash (AVMap m)     = hashVariant "map"     [hash m]
   hash (AVParty p)   = hashVariant "party"   [hash p]
   hash (AVInstrumentId i) = hashVariant "instrumentId" [hash i]
+  hash (AVDate d)    = hashVariant "date"    [hash d]

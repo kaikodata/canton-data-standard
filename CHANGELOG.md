@@ -13,10 +13,17 @@ share one version line while the standard is pre-release.
   new `InstrumentId` record mirrors the token standard's
   `Splice.Api.Token.HoldingV2.InstrumentId` (`admin`, `id`) without importing
   it.
+- `canton-data-standard-utils-v1` — `AnyValue` gains `AVDate`, with
+  `ToAnyValue`/`FromAnyValue` instances, so a calendar date the source gives
+  without a time of day (a maturity, ex-dividend or index level date) is carried
+  as a Daml `Date` instead of a `Time` at midnight UTC.
 - `canton-data-standard-codecs` — structural hash tags `party` (the full party
   id text) and `instrumentId` (the record `admin`, `id`), pinned by new golden
   vectors. Off-ledger signers must implement both tags before emitting either
   value.
+- `canton-data-standard-codecs` — structural hash tag `date`, the date as
+  integer days since 1970-01-01 (`dateToDays`), pinned by new golden vectors.
+  Off-ledger signers must implement the tag before emitting a date.
 - `make upgrade-check`, part of `make ci`: utils-v1 is checked as a
   smart-contract upgrade of its last release, kept in `upgrade-baselines/`.
 

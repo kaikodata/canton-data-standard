@@ -30,6 +30,7 @@ data AnyValue
   | AVMap (TextMap AnyValue)
   | AVParty Party
   | AVInstrumentId InstrumentId
+  | AVDate Date
   deriving (Eq, Show)
 
 -- | A globally unique identifier for an instrument, so a payload can name the
@@ -81,6 +82,11 @@ instance FromAnyValue Text where
 instance ToAnyValue Time where toAny = AVTime
 instance FromAnyValue Time where
   fromAny (AVTime t) = Some t
+  fromAny _          = None
+
+instance ToAnyValue Date where toAny = AVDate
+instance FromAnyValue Date where
+  fromAny (AVDate d) = Some d
   fromAny _          = None
 
 instance ToAnyValue Bool where toAny = AVBool
