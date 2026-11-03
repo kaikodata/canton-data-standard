@@ -36,8 +36,9 @@ share one version line while the standard is pre-release.
 - `quote-1` semantics clarified, with no change to its fields
   ([#18](https://github.com/kaikodata/canton-data-standard/issues/18)): `price`
   is a reference price with no trade size attached, derived by a methodology
-  the distributor documents in `metadata`; a price executable at a given size
-  belongs under a schema of its own. For a price derived from a pool or an order
+  the distributor documents in `metadata` on the push path and out of band on
+  the pull path, where a signed payload carries no `metadata`; a price
+  executable at a given size belongs under a schema of its own. For a price derived from a pool or an order
   book, `priceTime` is the time of the last trade or book change the price
   reflects, not the time the distributor read it.
 - `quote-consumer` and `distributor-key-consumer` bound the age of the quote's
