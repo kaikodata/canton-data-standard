@@ -1,0 +1,92 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Field lookup that says why it failed. `lookupField` answers `None` both for
+-- a field the payload does not carry and for one it carries at another type,
+-- and those need different fixes: the first is a distributor not sending the
+-- field, the second a schema disagreement. `lookupFieldEither` tells them apart
+-- and is otherwise the same read: strict, with no coercion between types.
+module DataStandard.Codecs.Lookup
+  ( LookupError(..)
+  , ExpectedType(..)
+  , lookupFieldEither
+  , anyValueType
+  ) where
+
+import DA.List (dedup)
+import DA.Text (isInfixOf)
+import DA.TextMap (TextMap)
+import qualified DA.TextMap as TM
+
+import DataStandard.Utils (AnyValue(..), FromAnyValue(..), InstrumentId, Values)
+
+-- | Why `lookupFieldEither` found no value.
+data LookupError
+  = Missing
+    -- ^ The payload has no field under the key.
+  | WrongType with
+      expected : Text
+        -- ^ The type asked for, as `ExpectedType` names it.
+      actual : Text
+        -- ^ The type the field holds, as `anyValueType` names it.
+  deriving (Eq, Show)
+
+-- | The name of a type `lookupFieldEither` can be asked for, written as the
+-- Daml type it is (`Decimal`, `[Int]`, `TextMap Text`), so a `WrongType`
+-- reads the same as the schema it disagrees with. The argument is a proxy and
+-- is never evaluated.
+class ExpectedType a where
+  expectedType : proxy a -> Text
+
+instance ExpectedType Int where expectedType _ = "Int"
+instance ExpectedType Decimal where expectedType _ = "Decimal"
+instance ExpectedType Text where expectedType _ = "Text"
+instance ExpectedType Time where expectedType _ = "Time"
+instance ExpectedType Bool where expectedType _ = "Bool"
+instance ExpectedType Party where expectedType _ = "Party"
+instance ExpectedType InstrumentId where expectedType _ = "InstrumentId"
+instance ExpectedType Date where expectedType _ = "Date"
+instance ExpectedType AnyValue where expectedType _ = "AnyValue"
+
+instance ExpectedType a => ExpectedType [a] where
+  expectedType _ = "[" <> expectedType (None : Optional a) <> "]"
+
+instance ExpectedType a => ExpectedType (TextMap a) where
+  expectedType _ = "TextMap " <> parenthesise (expectedType (None : Optional a))
+
+-- | The type a value holds, named as `ExpectedType` names types. A list or map
+-- whose elements all share one type is named after it; one mixing types, or an
+-- empty one, has `AnyValue` elements, which is all that can be said of it.
+anyValueType : AnyValue -> Text
+anyValueType v = case v of
+  AVInt _ -> "Int"
+  AVDecimal _ -> "Decimal"
+  AVText _ -> "Text"
+  AVTime _ -> "Time"
+  AVBool _ -> "Bool"
+  AVParty _ -> "Party"
+  AVInstrumentId _ -> "InstrumentId"
+  AVDate _ -> "Date"
+  AVList xs -> "[" <> elementType xs <> "]"
+  AVMap m -> "TextMap " <> parenthesise (elementType (map snd (TM.toList m)))
+  where
+    elementType xs = case dedup (map anyValueType xs) of
+      [t] -> t
+      _ -> "AnyValue"
+
+parenthesise : Text -> Text
+parenthesise t
+  | " " `isInfixOf` t = "(" <> t <> ")"
+  | otherwise = t
+
+-- | Read a field from a payload at its expected type, or say why there is none.
+-- Agrees with `lookupField` on every payload: `Right` exactly when it answers
+-- `Some`, with the same value.
+lookupFieldEither : forall v. (FromAnyValue v, ExpectedType v) => Text -> Values -> Either LookupError v
+lookupFieldEither key row = case TM.lookup key row of
+  None -> Left Missing
+  Some av -> case fromAny av of
+    Some v -> Right v
+    None -> Left WrongType with
+      expected = expectedType (None : Optional v)
+      actual = anyValueType av

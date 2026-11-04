@@ -99,7 +99,10 @@ signed the contract and cannot be forged. Everything else is your decision.
   The reference consumers do this with `maxQuoteAge` and `maxPriceAge` gates
   rather than leaving it to prose.
 - **Schema.** Handle `None` from `lookupField`, and gate on `schemaVersion` if
-  you support several distributor schemas.
+  you support several distributor schemas. `None` covers both a field that was
+  not sent and one sent at another type; when you need to tell them apart, use
+  `lookupFieldEither` from `DataStandard.Codecs.Lookup`, which returns
+  `Missing` or `WrongType` with the expected and actual types.
 
 Unknown `values` fields and unknown `metadata` keys are normal; ignoring what
 you do not understand is what keeps an old consumer working against a newer
