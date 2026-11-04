@@ -17,6 +17,20 @@ share one version line while the standard is pre-release.
   `ToAnyValue`/`FromAnyValue` instances, so a calendar date the source gives
   without a time of day (a maturity, ex-dividend or index level date) is carried
   as a Daml `Date` instead of a `Time` at midnight UTC.
+- `canton-data-standard-utils-v1` — `AnyValue` gains `AVNull`, a field sent
+  with no value, and `ToAnyValue`/`FromAnyValue` instances for `Optional a`
+  (`None` as `AVNull`, `Some v` as `v`), so a schema can declare an optional
+  field such as `Optional Int` (`AVInt` or `AVNull`) instead of a sentinel. A
+  field set to `AVNull` and an absent field are different payloads with
+  different hashes: each schema must state which form every optional field
+  uses.
+- `canton-data-standard-codecs` — structural hash tag `null`, a variant with no
+  fields (`sha256("null|0")`), pinned by new golden vectors. Off-ledger signers
+  must implement the tag before emitting a null.
+- `canton-data-standard-codecs` — `LookupError` gains `NoValue`, returned by
+  `lookupFieldEither` for an `AVNull` field read at a type that is not
+  `Optional`. `ExpectedType` names `Optional a`, and `anyValueType` names a
+  collection mixing one type with nulls after its `Optional`.
 - `canton-data-standard-codecs` — structural hash tags `party` (the full party
   id text) and `instrumentId` (the record `admin`, `id`), pinned by new golden
   vectors. Off-ledger signers must implement both tags before emitting either

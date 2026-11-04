@@ -201,3 +201,7 @@ instance Hashable AnyValue where
   hash (AVParty p)   = hashVariant "party"   [hash p]
   hash (AVInstrumentId i) = hashVariant "instrumentId" [hash i]
   hash (AVDate d)    = hashVariant "date"    [hash d]
+  -- No fields, so the node is sha256("null|0"): a map entry holding it still
+  -- counts towards the map's entries, which is why it never hashes like an
+  -- absent key.
+  hash AVNull        = hashVariant "null"    []

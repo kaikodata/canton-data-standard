@@ -4,8 +4,10 @@
 -- | Field lookup that says why it failed. `lookupField` answers `None` both for
 -- a field the payload does not carry and for one it carries at another type,
 -- and those need different fixes: the first is a distributor not sending the
--- field, the second a schema disagreement. `lookupFieldEither` tells them apart
--- and is otherwise the same read: strict, with no coercion between types.
+-- field, the second a schema disagreement. `lookupFieldEither` tells them apart,
+-- and tells both from a field sent as `AVNull` to a reader that did not ask for
+-- an `Optional`. It is otherwise the same read: strict, with no coercion
+-- between types.
 module DataStandard.Codecs.Lookup
   ( LookupError(..)
   , ExpectedType(..)
@@ -29,6 +31,10 @@ data LookupError
         -- ^ The type asked for, as `ExpectedType` names it.
       actual : Text
         -- ^ The type the field holds, as `anyValueType` names it.
+  | NoValue
+    -- ^ The field is `AVNull` and the type asked for is not an `Optional`: the
+    -- distributor sent the field with no value. Read it as `Optional a` to
+    -- accept that.
   deriving (Eq, Show)
 
 -- | The name of a type `lookupFieldEither` can be asked for, written as the
@@ -54,9 +60,14 @@ instance ExpectedType a => ExpectedType [a] where
 instance ExpectedType a => ExpectedType (TextMap a) where
   expectedType _ = "TextMap " <> parenthesise (expectedType (None : Optional a))
 
--- | The type a value holds, named as `ExpectedType` names types. A list or map
--- whose elements all share one type is named after it; one mixing types, or an
--- empty one, has `AnyValue` elements, which is all that can be said of it.
+instance ExpectedType a => ExpectedType (Optional a) where
+  expectedType _ = "Optional " <> parenthesise (expectedType (None : Optional a))
+
+-- | The type a value holds, named as `ExpectedType` names types. `AVNull` on
+-- its own is `Null`, since no single type holds it. A list or map whose
+-- elements all share one type is named after it, and one mixing that type with
+-- `AVNull` after its `Optional`; one mixing other types, or an empty one, has
+-- `AnyValue` elements, which is all that can be said of it.
 anyValueType : AnyValue -> Text
 anyValueType v = case v of
   AVInt _ -> "Int"
@@ -67,12 +78,17 @@ anyValueType v = case v of
   AVParty _ -> "Party"
   AVInstrumentId _ -> "InstrumentId"
   AVDate _ -> "Date"
+  AVNull -> "Null"
   AVList xs -> "[" <> elementType xs <> "]"
   AVMap m -> "TextMap " <> parenthesise (elementType (map snd (TM.toList m)))
   where
-    elementType xs = case dedup (map anyValueType xs) of
-      [t] -> t
-      _ -> "AnyValue"
+    elementType xs =
+      let types = dedup (map anyValueType xs)
+      in case filter (/= "Null") types of
+        [] | not (null types) -> "Null"
+        [t] | "Null" `elem` types -> "Optional " <> parenthesise t
+            | otherwise -> t
+        _ -> "AnyValue"
 
 parenthesise : Text -> Text
 parenthesise t
@@ -81,12 +97,16 @@ parenthesise t
 
 -- | Read a field from a payload at its expected type, or say why there is none.
 -- Agrees with `lookupField` on every payload: `Right` exactly when it answers
--- `Some`, with the same value.
+-- `Some`, with the same value. An absent key is `Missing` even when the type
+-- asked for is an `Optional`: only `AVNull` reads as `None`, so the form a
+-- schema chose for an optional field is checked rather than papered over.
 lookupFieldEither : forall v. (FromAnyValue v, ExpectedType v) => Text -> Values -> Either LookupError v
 lookupFieldEither key row = case TM.lookup key row of
   None -> Left Missing
   Some av -> case fromAny av of
     Some v -> Right v
-    None -> Left WrongType with
-      expected = expectedType (None : Optional v)
-      actual = anyValueType av
+    None
+      | av == AVNull -> Left NoValue
+      | otherwise -> Left WrongType with
+          expected = expectedType (None : Optional v)
+          actual = anyValueType av

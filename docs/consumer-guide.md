@@ -99,10 +99,17 @@ signed the contract and cannot be forged. Everything else is your decision.
   The reference consumers do this with `maxQuoteAge` and `maxPriceAge` gates
   rather than leaving it to prose.
 - **Schema.** Handle `None` from `lookupField`, and gate on `schemaVersion` if
-  you support several distributor schemas. `None` covers both a field that was
-  not sent and one sent at another type; when you need to tell them apart, use
-  `lookupFieldEither` from `DataStandard.Codecs.Lookup`, which returns
-  `Missing` or `WrongType` with the expected and actual types.
+  you support several distributor schemas. `None` covers a field that was not
+  sent, one sent at another type, and one sent as `AVNull`; when you need to
+  tell them apart, use `lookupFieldEither` from `DataStandard.Codecs.Lookup`,
+  which returns `Missing`, `WrongType` with the expected and actual types, or
+  `NoValue`.
+- **Optional fields.** Read a field the schema declares optional at an
+  `Optional` type: `lookupField "bid" v.values : Optional (Optional Decimal)` is
+  `Some (Some p)` for a value, `Some None` for `AVNull`, and `None` for an
+  absent key. Absent and `AVNull` are different payloads with different hashes,
+  and the schema says which form each optional field uses; on the pull path,
+  rebuild the payload in exactly that form, or the signature will not verify.
 
 Unknown `values` fields and unknown `metadata` keys are normal; ignoring what
 you do not understand is what keeps an old consumer working against a newer

@@ -57,9 +57,9 @@ The full producer is [`examples/datapoint-producer`](../examples/datapoint-produ
 ## The `values` payload
 
 `Values` maps field names to `AnyValue`: the scalars `Int`, `Decimal`, `Text`,
-`Time`, `Date`, `Bool`, the identifiers `Party` and `InstrumentId`, plus an
-ordered list and a string-keyed map. Lists and maps nest, so a structured
-payload such as an index's constituents is expressible.
+`Time`, `Date`, `Bool`, the identifiers `Party` and `InstrumentId`, a null
+(`AVNull`), plus an ordered list and a string-keyed map. Lists and maps nest, so
+a structured payload such as an index's constituents is expressible.
 
 Carry a field your source gives as a calendar date, such as a bond's maturity
 date or an index level's date, as a `Date` rather than as a `Time` at midnight
@@ -83,6 +83,37 @@ check a signature, which needs one encoding per value. It lives in
 coordinated rollout, not a drop-in change, since a reader built against an
 older version aborts on a constructor it does not know.
 
+### Optional fields: absent or `AVNull`
+
+A field your source was asked for but has no value for, such as a security that
+lacks a requested field, can be sent as `AVNull` instead of a sentinel like the
+empty text. `insertField` writes an `Optional` value for you: `Some v` as `v`,
+`None` as `AVNull`. So a schema can declare a field as `Optional Int`, meaning
+it holds an `AVInt` or `AVNull`, and a list can carry gaps:
+
+```daml
+values = insertField "bid"    (bid : Optional Decimal)
+       $ insertField "series" ([Some 4.51, None, Some 4.53] : [Optional Decimal])
+           TM.empty
+```
+
+Leaving the key out of the payload and setting it to `AVNull` are two different
+payloads, and they hash differently:
+
+```
+{ "date": "2026-08-01", "value": 4.51 }
+{ "date": "2026-08-01", "value": 4.51, "info": null }
+```
+
+A map hashes its entries, so the second payload has one more than the first. If
+you sign one form and a consumer rebuilds the payload in the other to check the
+signature, verification fails even though neither side is wrong by its own
+reading. **For every optional field, your schema must state which of the two
+forms it uses**, and you must emit that form every time. Use `AVNull` when the
+consumer should know the field was asked for and had no value, and leave the key
+out when the field is simply not part of this publication. Changing a field's
+form is a type change, so it takes a major `schemaVersion`.
+
 Build payloads with `insertField`, which tags native values:
 
 ```daml
@@ -99,7 +130,8 @@ values = insertField "assetPair" assetPair
 Document your field names and types per feed, and version that contract with
 `schemaVersion`: patch for documentation or semantics clarifications, minor for
 added fields (unknown fields read as `None`, so existing consumers are
-unaffected), major for a rename, a removal or a type change.
+unaffected), major for a rename, a removal or a type change, including making a
+field optional or switching an optional field between absent and `AVNull`.
 
 ## Metadata
 
