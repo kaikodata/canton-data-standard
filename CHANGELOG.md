@@ -3,7 +3,12 @@
 Notable changes to the Canton Data Standard packages, newest first. All packages
 share one version line while the standard is pre-release.
 
-## [0.3.0]
+## [0.3.0] — unreleased
+
+Not yet tagged: the 0.3.0 DARs in `dars/` are rebuilt in place as entries land
+here, so their package ids are not final until the release. Do not upload them
+to a shared participant before then; a participant rejects a later 0.3.0 build
+with a different package id under the same name and version.
 
 ### Added
 
@@ -30,7 +35,13 @@ share one version line while the standard is pre-release.
 - `canton-data-standard-codecs` — `LookupError` gains `NoValue`, returned by
   `lookupFieldEither` for an `AVNull` field read at a type that is not
   `Optional`. `ExpectedType` names `Optional a`, and `anyValueType` names a
-  collection mixing one type with nulls after its `Optional`.
+  collection mixing one type with nulls after its `Optional`, at every depth
+  (`[[Optional Int]]` for inner lists with gaps).
+- `canton-data-standard-utils-v1` — `insertOmittableField` writes an optional
+  field in the absent form, leaving the key out for `None`, beside
+  `insertField`, which writes `None` as `AVNull`. `canton-data-standard-codecs`
+  — `lookupOmittableFieldEither` reads that form back: `Right None` for an
+  absent key, `NoValue` for an `AVNull`.
 - `canton-data-standard-codecs` — structural hash tags `party` (the full party
   id text) and `instrumentId` (the record `admin`, `id`), pinned by new golden
   vectors. Off-ledger signers must implement both tags before emitting either

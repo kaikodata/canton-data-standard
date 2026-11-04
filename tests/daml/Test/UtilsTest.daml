@@ -139,3 +139,23 @@ testNullReadAsScalarIsNone = do
   (lookupField "info" vs : Optional Int) === None
   (lookupField "info" vs : Optional [Int]) === None
   (lookupField "info" vs : Optional AnyValue) === Some AVNull
+
+-- | `Optional` is one level deep: `Some None` at `Optional (Optional Int)` is
+-- written as `AVNull`, the same as `None`, and reads back as `None`. Pinned so
+-- the limit the instance documents is the limit it has.
+testNestedOptionalCollapses : Script ()
+testNestedOptionalCollapses = do
+  let vs = insertField "x" (Some None : Optional (Optional Int)) TM.empty
+  TM.lookup "x" vs === Some AVNull
+  lookupField "x" vs === Some (None : Optional (Optional Int))
+
+-- | `insertOmittableField` writes the absent form: `Some v` as `insertField`
+-- writes `v`, and `None` as no key at all, removing one already there. It never
+-- writes `AVNull`, so its payloads hash as the absent form.
+testInsertOmittableField : Script ()
+testInsertOmittableField = do
+  let vs = insertOmittableField "bid" (Some 101 : Optional Int)
+         $ insertOmittableField "ask" (None : Optional Int) TM.empty
+  vs === insertField "bid" (101 : Int) TM.empty
+  TM.member "ask" vs === False
+  insertOmittableField "bid" (None : Optional Int) vs === TM.empty

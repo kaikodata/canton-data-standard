@@ -114,6 +114,22 @@ consumer should know the field was asked for and had no value, and leave the key
 out when the field is simply not part of this publication. Changing a field's
 form is a type change, so it takes a major `schemaVersion`.
 
+Write each form with its own function. `insertField` on an `Optional` writes
+the `AVNull` form; `insertOmittableField` writes the absent form, inserting
+`Some v` as `v` and leaving the key out for `None`:
+
+```daml
+values = insertField          "bid"  (bid  : Optional Decimal) -- AVNull form
+       $ insertOmittableField "info" (info : Optional Text)    -- absent form
+           TM.empty
+```
+
+An optional field is one level of `Optional`. `AVNull` reads as the outer
+`None` of any nesting, so a field declared `Optional (Optional a)`, or a list of
+them, cannot carry `Some None`: it is written as `AVNull` and reads back as
+`None`. Declare optional fields at `Optional a` for an `a` that is not itself
+optional.
+
 Build payloads with `insertField`, which tags native values:
 
 ```daml

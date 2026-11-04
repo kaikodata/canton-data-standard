@@ -5,18 +5,19 @@
 -- a field the payload does not carry and for one it carries at another type,
 -- and those need different fixes: the first is a distributor not sending the
 -- field, the second a schema disagreement. `lookupFieldEither` tells them apart,
--- and tells both from a field sent as `AVNull` to a reader that did not ask for
--- an `Optional`. It is otherwise the same read: strict, with no coercion
--- between types.
+-- and tells both from a field sent as `AVNull` to a reader that does not accept
+-- a null. `lookupOmittableFieldEither` reads an optional field whose schema
+-- leaves the key out when there is no value. Both are otherwise the same read:
+-- strict, with no coercion between types.
 module DataStandard.Codecs.Lookup
   ( LookupError(..)
   , ExpectedType(..)
   , lookupFieldEither
+  , lookupOmittableFieldEither
   , anyValueType
   ) where
 
-import DA.List (dedup)
-import DA.Text (isInfixOf)
+import DA.Text (isInfixOf, isPrefixOf)
 import DA.TextMap (TextMap)
 import qualified DA.TextMap as TM
 
@@ -32,9 +33,10 @@ data LookupError
       actual : Text
         -- ^ The type the field holds, as `anyValueType` names it.
   | NoValue
-    -- ^ The field is `AVNull` and the type asked for is not an `Optional`: the
-    -- distributor sent the field with no value. Read it as `Optional a` to
-    -- accept that.
+    -- ^ The field is `AVNull` and the read does not accept a null: the type
+    -- asked for is not an `Optional`, or the schema leaves the key out when
+    -- there is no value (`lookupOmittableFieldEither`). Read a field whose
+    -- schema uses `AVNull` as `Optional a` to accept it.
   deriving (Eq, Show)
 
 -- | The name of a type `lookupFieldEither` can be asked for, written as the
@@ -63,43 +65,95 @@ instance ExpectedType a => ExpectedType (TextMap a) where
 instance ExpectedType a => ExpectedType (Optional a) where
   expectedType _ = "Optional " <> parenthesise (expectedType (None : Optional a))
 
--- | The type a value holds, named as `ExpectedType` names types. `AVNull` on
--- its own is `Null`, since no single type holds it. A list or map whose
--- elements all share one type is named after it, and one mixing that type with
--- `AVNull` after its `Optional`; one mixing other types, or an empty one, has
--- `AnyValue` elements, which is all that can be said of it.
+-- | The type a value holds, named as `ExpectedType` names types: the narrowest
+-- type `lookupFieldEither` reads it at. `AVNull` on its own is `Null`, since no
+-- single type holds it. A list or map is named after the one type that reads
+-- all its elements: elements of one type give that type, nulls beside them give
+-- its `Optional`, and this holds at every depth, so a list of lists with gaps
+-- is `[[Optional Int]]`. An empty collection constrains nothing, and elements
+-- no one type reads are `AnyValue`, which is all that can be said of them.
 anyValueType : AnyValue -> Text
-anyValueType v = case v of
-  AVInt _ -> "Int"
-  AVDecimal _ -> "Decimal"
-  AVText _ -> "Text"
-  AVTime _ -> "Time"
-  AVBool _ -> "Bool"
-  AVParty _ -> "Party"
-  AVInstrumentId _ -> "InstrumentId"
-  AVDate _ -> "Date"
-  AVNull -> "Null"
-  AVList xs -> "[" <> elementType xs <> "]"
-  AVMap m -> "TextMap " <> parenthesise (elementType (map snd (TM.toList m)))
-  where
-    elementType xs =
-      let types = dedup (map anyValueType xs)
-      in case filter (/= "Null") types of
-        [] | not (null types) -> "Null"
-        [t] | "Null" `elem` types -> "Optional " <> parenthesise t
-            | otherwise -> t
-        _ -> "AnyValue"
+anyValueType = render . shapeOf
 
+-- The type `anyValueType` names, before it is rendered. `Unknown` is the
+-- element of an empty collection and unifies with anything; `Mixed` is
+-- elements no one type reads.
+data Shape
+  = Scalar Text
+  | NullShape
+  | ListOf Shape
+  | MapOf Shape
+  | OptionalOf Shape
+  | Unknown
+  | Mixed
+  deriving Eq
+
+shapeOf : AnyValue -> Shape
+shapeOf v = case v of
+  AVInt _ -> Scalar "Int"
+  AVDecimal _ -> Scalar "Decimal"
+  AVText _ -> Scalar "Text"
+  AVTime _ -> Scalar "Time"
+  AVBool _ -> Scalar "Bool"
+  AVParty _ -> Scalar "Party"
+  AVInstrumentId _ -> Scalar "InstrumentId"
+  AVDate _ -> Scalar "Date"
+  AVNull -> NullShape
+  AVList xs -> ListOf (elements xs)
+  AVMap m -> MapOf (elements (map snd (TM.toList m)))
+  where
+    elements xs = foldl unify Unknown (map shapeOf xs)
+
+-- The narrowest shape reading values of both shapes.
+unify : Shape -> Shape -> Shape
+unify a b = case (a, b) of
+  (Unknown, _) -> b
+  (_, Unknown) -> a
+  (Mixed, _) -> Mixed
+  (_, Mixed) -> Mixed
+  (NullShape, _) -> orNull b
+  (_, NullShape) -> orNull a
+  (OptionalOf x, OptionalOf y) -> orNull (unify x y)
+  (OptionalOf x, _) -> orNull (unify x b)
+  (_, OptionalOf y) -> orNull (unify a y)
+  (ListOf x, ListOf y) -> ListOf (unify x y)
+  (MapOf x, MapOf y) -> MapOf (unify x y)
+  _ | a == b -> a
+    | otherwise -> Mixed
+
+-- A shape that also reads `AVNull`. There is one level of `Optional`, since
+-- `AVNull` reads as the outer `None` of any nesting.
+orNull : Shape -> Shape
+orNull s = case s of
+  NullShape -> NullShape
+  Mixed -> Mixed
+  OptionalOf _ -> s
+  _ -> OptionalOf s
+
+render : Shape -> Text
+render s = case s of
+  Scalar t -> t
+  NullShape -> "Null"
+  ListOf e -> "[" <> render e <> "]"
+  MapOf e -> "TextMap " <> parenthesise (render e)
+  OptionalOf e -> "Optional " <> parenthesise (render e)
+  Unknown -> "AnyValue"
+  Mixed -> "AnyValue"
+
+-- Wraps an applied type such as `TextMap Int` as an argument. A list type is
+-- already delimited by its brackets, so `[Optional Int]` stays as written.
 parenthesise : Text -> Text
 parenthesise t
+  | "[" `isPrefixOf` t = t
   | " " `isInfixOf` t = "(" <> t <> ")"
   | otherwise = t
 
 -- | Read a field from a payload at its expected type, or say why there is none.
 -- Agrees with `lookupField` on every payload: `Right` exactly when it answers
 -- `Some`, with the same value. An absent key is `Missing` even when the type
--- asked for is an `Optional`: only `AVNull` reads as `None`, so the form a
--- schema chose for an optional field is checked rather than papered over.
+-- asked for is an `Optional`: only `AVNull` reads as `None`. That checks the
+-- form of a field whose schema writes `AVNull` when there is no value; for one
+-- whose schema leaves the key out, use `lookupOmittableFieldEither`.
 lookupFieldEither : forall v. (FromAnyValue v, ExpectedType v) => Text -> Values -> Either LookupError v
 lookupFieldEither key row = case TM.lookup key row of
   None -> Left Missing
@@ -110,3 +164,14 @@ lookupFieldEither key row = case TM.lookup key row of
       | otherwise -> Left WrongType with
           expected = expectedType (None : Optional v)
           actual = anyValueType av
+
+-- | Read an optional field whose schema leaves the key out when there is no
+-- value, the form `insertOmittableField` writes: `Right None` for an absent
+-- key and `Right (Some v)` for a value at `v`. A field sent as `AVNull` is
+-- `NoValue`, since that is the other form, and it hashes differently from the
+-- payload the schema describes. Ask for the value's own type, not an
+-- `Optional` of it.
+lookupOmittableFieldEither : forall v. (FromAnyValue v, ExpectedType v) => Text -> Values -> Either LookupError (Optional v)
+lookupOmittableFieldEither key row = case lookupFieldEither key row of
+  Left Missing -> Right None
+  r -> Some <$> r

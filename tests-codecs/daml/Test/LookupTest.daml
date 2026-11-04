@@ -15,7 +15,8 @@ import qualified DA.TextMap as TM
 import DA.Time (addRelTime, milliseconds)
 import Daml.Script
 
-import DataStandard.Codecs.Lookup (ExpectedType, LookupError(..), lookupFieldEither)
+import DataStandard.Codecs.Lookup
+  (ExpectedType, LookupError(..), lookupFieldEither, lookupOmittableFieldEither)
 import DataStandard.Codecs.StructuralHash (epoch)
 import DataStandard.Utils
   (AnyValue(..), FromAnyValue, InstrumentId(..), Values, insertField, lookupField)
@@ -40,6 +41,10 @@ sample = TM.fromList
   , ("gaps", AVList [AVDecimal 4.51, AVNull, AVDecimal 4.53])
   , ("nulls", AVList [AVNull, AVNull])
   , ("bids", AVMap (TM.fromList [("btc", AVMap TM.empty), ("eth", AVNull)]))
+  , ("ragged", AVList [AVList [AVInt 1], AVList [AVInt 2, AVNull]])
+  , ("rows", AVList [AVList [AVDecimal 4.51, AVNull], AVNull])
+  , ("sparse", AVList [AVList [], AVList [AVInt 1]])
+  , ("grid", AVList [AVList [AVInt 1], AVList [AVText "one"]])
   ]
 
 -- | A field present at the requested type comes back as `Right`.
@@ -138,6 +143,38 @@ testWrongTypeWithNulls = do
   (lookupFieldEither "gaps" sample : Either LookupError [Optional Int])
     === Left WrongType with expected = "[Optional Int]"; actual = "[Optional Decimal]"
 
+-- | Collections are named at every depth, not only the top one: inner lists
+-- with gaps name their `Optional`, an empty inner list constrains nothing, and
+-- inner lists of different types are named as far as they agree. A list type
+-- inside an applied one is not parenthesised, since its brackets delimit it.
+testNestedCollectionNames : Script ()
+testNestedCollectionNames = do
+  (lookupFieldEither "ragged" sample : Either LookupError [[Int]])
+    === Left WrongType with expected = "[[Int]]"; actual = "[[Optional Int]]"
+  lookupFieldEither "ragged" sample === Right ([[Some 1], [Some 2, None]] : [[Optional Int]])
+  (lookupFieldEither "rows" sample : Either LookupError [[Decimal]])
+    === Left WrongType with expected = "[[Decimal]]"; actual = "[Optional [Optional Decimal]]"
+  (lookupFieldEither "sparse" sample : Either LookupError [Int])
+    === Left WrongType with expected = "[Int]"; actual = "[[Int]]"
+  lookupFieldEither "sparse" sample === Right ([[], [1]] : [[Int]])
+  (lookupFieldEither "grid" sample : Either LookupError [Int])
+    === Left WrongType with expected = "[Int]"; actual = "[[AnyValue]]"
+  (lookupFieldEither "t" sample : Either LookupError (Optional [Optional Int]))
+    === Left WrongType with expected = "Optional [Optional Int]"; actual = "Text"
+  (lookupFieldEither "t" sample : Either LookupError (TextMap [Optional Int]))
+    === Left WrongType with expected = "TextMap [Optional Int]"; actual = "Text"
+
+-- | A field whose schema leaves the key out when there is no value reads absent
+-- as `Right None`, and a null as `NoValue`: the null form is the other payload,
+-- reported rather than absorbed.
+testOmittable : Script ()
+testOmittable = do
+  lookupOmittableFieldEither "absent" sample === Right (None : Optional Int)
+  lookupOmittableFieldEither "i" sample === Right (Some 42 : Optional Int)
+  (lookupOmittableFieldEither "none" sample : Either LookupError (Optional Int)) === Left NoValue
+  (lookupOmittableFieldEither "t" sample : Either LookupError (Optional Int))
+    === Left WrongType with expected = "Int"; actual = "Text"
+
 -- | Every case above, read through `lookupField` too: it is `Some` exactly when
 -- `lookupFieldEither` is `Right`, with the same value, so the new read changes
 -- nothing about the old one.
@@ -162,6 +199,8 @@ testAgreesWithLookupField = do
   agree (None : Optional (Optional Int)) payload
   agree (None : Optional (Optional Decimal)) payload
   agree (None : Optional [Optional Decimal]) payload
+  agree (None : Optional [[Optional Int]]) payload
+  agree (None : Optional [[Int]]) payload
 
 agree : forall v. (FromAnyValue v, ExpectedType v, Eq v, Show v) => Optional v -> Values -> Script ()
 agree _ payload = forA_ ("absent" :: map fst (TM.toList payload)) $ \key ->
