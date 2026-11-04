@@ -24,6 +24,10 @@ share one version line while the standard is pre-release.
 - `canton-data-standard-codecs` — structural hash tag `date`, the date as
   integer days since 1970-01-01 (`dateToDays`), pinned by new golden vectors.
   Off-ledger signers must implement the tag before emitting a date.
+- `canton-data-standard-codecs` — `DataStandard.Codecs.Lookup.lookupFieldEither`,
+  a `lookupField` that says why it found nothing: `Missing` for an absent field,
+  `WrongType` (naming the expected and actual types) for one held at another
+  type. Same strict read, with no coercion; `lookupField` is unchanged.
 - `make upgrade-check`, part of `make ci`: utils-v1 is checked as a
   smart-contract upgrade of its last release, kept in `upgrade-baselines/`.
 

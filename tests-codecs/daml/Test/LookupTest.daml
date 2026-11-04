@@ -1,0 +1,123 @@
+-- Copyright (c) 2026 Challenger Deep SAS. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | `lookupFieldEither`: each failure case reports its own reason, the type
+-- names read as the Daml types they are, and on every payload it agrees with
+-- `lookupField`, which stays the strict, coercion-free read it was.
+module Test.LookupTest where
+
+import DA.Assert ((===))
+import DA.Date (Month(..), date)
+import DA.Either (eitherToOptional)
+import DA.Foldable (forA_)
+import DA.TextMap (TextMap)
+import qualified DA.TextMap as TM
+import DA.Time (addRelTime, milliseconds)
+import Daml.Script
+
+import DataStandard.Codecs.Lookup (ExpectedType, LookupError(..), lookupFieldEither)
+import DataStandard.Codecs.StructuralHash (epoch)
+import DataStandard.Utils
+  (AnyValue(..), FromAnyValue, InstrumentId(..), Values, insertField, lookupField)
+
+sampleTime : Time
+sampleTime = addRelTime epoch (milliseconds 1768480245000)
+
+sample : Values
+sample = TM.fromList
+  [ ("i", AVInt 42)
+  , ("d", AVDecimal 1.0432)
+  , ("t", AVText "eurc-usd")
+  , ("ts", AVTime sampleTime)
+  , ("b", AVBool True)
+  , ("day", AVDate (date 2027 Mar 19))
+  , ("xs", AVList [AVInt 1, AVInt 2])
+  , ("mixed", AVList [AVInt 1, AVText "one"])
+  , ("empty", AVList [])
+  , ("weights", AVMap (TM.fromList [("btc", AVDecimal 0.6), ("eth", AVDecimal 0.4)]))
+  , ("nested", AVMap (TM.fromList [("a", AVList [AVInt 1])]))
+  ]
+
+-- | A field present at the requested type comes back as `Right`.
+testFound : Script ()
+testFound = do
+  lookupFieldEither "i" sample === Right (42 : Int)
+  lookupFieldEither "d" sample === Right (1.0432 : Decimal)
+  lookupFieldEither "t" sample === Right ("eurc-usd" : Text)
+  lookupFieldEither "ts" sample === Right sampleTime
+  lookupFieldEither "b" sample === Right True
+  lookupFieldEither "day" sample === Right (date 2027 Mar 19)
+  lookupFieldEither "xs" sample === Right ([1, 2] : [Int])
+  (lookupFieldEither "empty" sample : Either LookupError [Text]) === Right []
+  (lookupFieldEither "weights" sample : Either LookupError (TextMap Decimal))
+    === Right (TM.fromList [("btc", 0.6), ("eth", 0.4)])
+  lookupFieldEither "mixed" sample === Right [AVInt 1, AVText "one"]
+
+-- | A key the payload does not carry is `Missing`, whatever type was asked for.
+testMissing : Script ()
+testMissing = do
+  (lookupFieldEither "absent" sample : Either LookupError Int) === Left Missing
+  (lookupFieldEither "absent" sample : Either LookupError [TextMap Text]) === Left Missing
+  (lookupFieldEither "absent" TM.empty : Either LookupError AnyValue) === Left Missing
+
+-- | A field held at another type is `WrongType`, naming both types, and is
+-- never coerced: not `Int` to `Decimal`, `Time` to `Date`, nor the reverse.
+testWrongTypeScalar : Script ()
+testWrongTypeScalar = do
+  (lookupFieldEither "i" sample : Either LookupError Decimal)
+    === Left WrongType with expected = "Decimal"; actual = "Int"
+  (lookupFieldEither "d" sample : Either LookupError Int)
+    === Left WrongType with expected = "Int"; actual = "Decimal"
+  (lookupFieldEither "ts" sample : Either LookupError Date)
+    === Left WrongType with expected = "Date"; actual = "Time"
+  (lookupFieldEither "day" sample : Either LookupError Time)
+    === Left WrongType with expected = "Time"; actual = "Date"
+  (lookupFieldEither "t" sample : Either LookupError Party)
+    === Left WrongType with expected = "Party"; actual = "Text"
+  (lookupFieldEither "b" sample : Either LookupError InstrumentId)
+    === Left WrongType with expected = "InstrumentId"; actual = "Bool"
+
+-- | Lists and maps are named by their element type, so a mismatch inside one
+-- is visible in the message; mixed elements read as `AnyValue`.
+testWrongTypeCompound : Script ()
+testWrongTypeCompound = do
+  (lookupFieldEither "xs" sample : Either LookupError Int)
+    === Left WrongType with expected = "Int"; actual = "[Int]"
+  (lookupFieldEither "xs" sample : Either LookupError [Text])
+    === Left WrongType with expected = "[Text]"; actual = "[Int]"
+  (lookupFieldEither "mixed" sample : Either LookupError [Int])
+    === Left WrongType with expected = "[Int]"; actual = "[AnyValue]"
+  (lookupFieldEither "empty" sample : Either LookupError Text)
+    === Left WrongType with expected = "Text"; actual = "[AnyValue]"
+  (lookupFieldEither "weights" sample : Either LookupError (TextMap Int))
+    === Left WrongType with expected = "TextMap Int"; actual = "TextMap Decimal"
+  (lookupFieldEither "nested" sample : Either LookupError (TextMap (TextMap Int)))
+    === Left WrongType with expected = "TextMap (TextMap Int)"; actual = "TextMap [Int]"
+  (lookupFieldEither "weights" sample : Either LookupError [TextMap Decimal])
+    === Left WrongType with expected = "[TextMap Decimal]"; actual = "TextMap Decimal"
+
+-- | Every case above, read through `lookupField` too: it is `Some` exactly when
+-- `lookupFieldEither` is `Right`, with the same value, so the new read changes
+-- nothing about the old one.
+testAgreesWithLookupField : Script ()
+testAgreesWithLookupField = do
+  registry <- allocateParty "registry"
+  let usdcx = InstrumentId with admin = registry; id = "USDCx"
+      payload = insertField "instrument" usdcx sample
+  agree (None : Optional Int) payload
+  agree (None : Optional Decimal) payload
+  agree (None : Optional Text) payload
+  agree (None : Optional Time) payload
+  agree (None : Optional Bool) payload
+  agree (None : Optional Date) payload
+  agree (None : Optional Party) payload
+  agree (None : Optional InstrumentId) payload
+  agree (None : Optional AnyValue) payload
+  agree (None : Optional [Int]) payload
+  agree (None : Optional [AnyValue]) payload
+  agree (None : Optional (TextMap Decimal)) payload
+  agree (None : Optional (TextMap [Int])) payload
+
+agree : forall v. (FromAnyValue v, ExpectedType v, Eq v, Show v) => Optional v -> Values -> Script ()
+agree _ payload = forA_ ("absent" :: map fst (TM.toList payload)) $ \key ->
+  eitherToOptional (lookupFieldEither @v key payload) === lookupField @v key payload
