@@ -105,3 +105,37 @@ testDateAndTimeAreNotInterchangeable = do
   (lookupField "maturityDate" vs : Optional Time) === None
   (lookupField "ts" vs : Optional Date) === None
   (lookupField "ts" vs : Optional Time) === Some now
+
+-- | An `Optional` field round-trips: `Some` as the bare value, `None` as
+-- `AVNull`. `Optional Int` therefore holds exactly `AVInt` or `AVNull`.
+testOptionalRoundTrip : Script ()
+testOptionalRoundTrip = do
+  let vs = insertField "bid" (Some 101 : Optional Int)
+         $ insertField "ask" (None : Optional Int) TM.empty
+  TM.lookup "bid" vs === Some (AVInt 101)
+  TM.lookup "ask" vs === Some AVNull
+  lookupField "bid" vs === Some (Some 101 : Optional Int)
+  lookupField "ask" vs === Some (None : Optional Int)
+  let series = [Some 4.51, None, Some 4.53] : [Optional Decimal]
+  lookupField "series" (insertField "series" series TM.empty) === Some series
+
+-- | Reading as `Optional` does not widen what a field may hold: a value of
+-- another type is still a failed read, and an absent key is still `None` at the
+-- outer level rather than an explicit null.
+testOptionalIsStrict : Script ()
+testOptionalIsStrict = do
+  let vs = insertField "rate" (1.0432 : Decimal)
+         $ insertField "info" (None : Optional Text) TM.empty
+  (lookupField "rate" vs : Optional (Optional Int)) === None
+  (lookupField "absent" vs : Optional (Optional Int)) === None
+  (lookupField "rate" vs : Optional (Optional Decimal)) === Some (Some 1.0432)
+
+-- | A null read at a type that is not `Optional` is a failed read, never a
+-- sentinel such as zero or the empty text.
+testNullReadAsScalarIsNone : Script ()
+testNullReadAsScalarIsNone = do
+  let vs = insertField "info" (None : Optional Text) TM.empty
+  (lookupField "info" vs : Optional Text) === None
+  (lookupField "info" vs : Optional Int) === None
+  (lookupField "info" vs : Optional [Int]) === None
+  (lookupField "info" vs : Optional AnyValue) === Some AVNull

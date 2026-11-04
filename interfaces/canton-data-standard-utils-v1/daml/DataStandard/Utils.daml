@@ -15,9 +15,9 @@ import DA.TextMap (TextMap)
 import qualified DA.TextMap as TM
 
 -- | The closed, recursive set of values a `Values` payload may hold: the
--- scalars plus an ordered list and a string-keyed map, so a structured payload
--- such as an index's constituents is expressible. The standard decides which
--- constructors exist; a distributor cannot add one. Closing the set gives every
+-- scalars and a null, plus an ordered list and a string-keyed map, so a
+-- structured payload such as an index's constituents is expressible. The
+-- standard decides which constructors exist; a distributor cannot add one. Closing the set gives every
 -- value a single canonical hash, which is what the pull path relies on when it
 -- reconstructs a payload on-ledger to check a signature.
 data AnyValue
@@ -31,6 +31,11 @@ data AnyValue
   | AVParty Party
   | AVInstrumentId InstrumentId
   | AVDate Date
+  | AVNull
+    -- ^ A field the payload carries with no value: the source was asked for it
+    -- and has none. An absent key says the payload does not carry the field at
+    -- all. The two hash differently, so a schema fixes which one an optional
+    -- field uses.
   deriving (Eq, Show)
 
 -- | A globally unique identifier for an instrument, so a payload can name the
@@ -121,6 +126,18 @@ instance ToAnyValue a => ToAnyValue (TextMap a) where
 instance FromAnyValue a => FromAnyValue (TextMap a) where
   fromAny (AVMap m) = traverseTextMap fromAny m
   fromAny _         = None
+
+-- | An optional value: `None` is `AVNull`, and `Some v` is `v` as it would be
+-- tagged on its own, so `Optional Int` holds `AVInt` or `AVNull`. A value of
+-- another type is still a failed read, never `None`.
+-- `AVNull` reads as the outer `None`, so a nested `Optional (Optional a)` does
+-- not round-trip `Some None`.
+instance ToAnyValue a => ToAnyValue (Optional a) where
+  toAny None     = AVNull
+  toAny (Some v) = toAny v
+instance FromAnyValue a => FromAnyValue (Optional a) where
+  fromAny AVNull = Some None
+  fromAny av     = fmap Some (fromAny av)
 
 -- | The record a consumer reconstructs and hands to `verifyDataPoint`: exactly
 -- the fields the distributor signed off-ledger. The signature travels beside

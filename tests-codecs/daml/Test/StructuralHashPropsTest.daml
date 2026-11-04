@@ -65,6 +65,23 @@ testTaggedIdentifiersAreDistinct = do
     (hash (AVInstrumentId usdcx))
     (hash (AVList [AVText (partyToText registry), AVText "USDCx"]))
 
+-- | A null is none of the empty values a distributor might use as a sentinel
+-- for one, and a map entry holding it is not the same payload as the key left
+-- out, nor as the key holding an empty text.
+testNullIsDistinct : Script ()
+testNullIsDistinct = do
+  expectNe "null vs empty text" (hash AVNull) (hash (AVText ""))
+  expectNe "null vs empty list" (hash AVNull) (hash (AVList []))
+  expectNe "null vs empty map" (hash AVNull) (hash (AVMap TM.empty))
+  let base = TM.fromList [("value", AVDecimal 4.51)]
+  expectNe "null entry vs absent key"
+    (hash (AVMap (TM.insert "info" AVNull base))) (hash (AVMap base))
+  expectNe "null entry vs empty text entry"
+    (hash (AVMap (TM.insert "info" AVNull base)))
+    (hash (AVMap (TM.insert "info" (AVText "") base)))
+  expectNe "null element vs dropped element"
+    (hash (AVList [AVInt 1, AVNull])) (hash (AVList [AVInt 1]))
+
 -- | The two tagged probes pinned in the vector contract, kept beside the
 -- separation property so the fix is anchored to values and not only to an
 -- inequality that any two distinct hashes would satisfy.

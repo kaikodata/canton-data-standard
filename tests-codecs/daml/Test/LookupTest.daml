@@ -36,6 +36,10 @@ sample = TM.fromList
   , ("empty", AVList [])
   , ("weights", AVMap (TM.fromList [("btc", AVDecimal 0.6), ("eth", AVDecimal 0.4)]))
   , ("nested", AVMap (TM.fromList [("a", AVList [AVInt 1])]))
+  , ("none", AVNull)
+  , ("gaps", AVList [AVDecimal 4.51, AVNull, AVDecimal 4.53])
+  , ("nulls", AVList [AVNull, AVNull])
+  , ("bids", AVMap (TM.fromList [("btc", AVMap TM.empty), ("eth", AVNull)]))
   ]
 
 -- | A field present at the requested type comes back as `Right`.
@@ -52,6 +56,7 @@ testFound = do
   (lookupFieldEither "weights" sample : Either LookupError (TextMap Decimal))
     === Right (TM.fromList [("btc", 0.6), ("eth", 0.4)])
   lookupFieldEither "mixed" sample === Right [AVInt 1, AVText "one"]
+  lookupFieldEither "none" sample === Right AVNull
 
 -- | A key the payload does not carry is `Missing`, whatever type was asked for.
 testMissing : Script ()
@@ -96,6 +101,43 @@ testWrongTypeCompound = do
   (lookupFieldEither "weights" sample : Either LookupError [TextMap Decimal])
     === Left WrongType with expected = "[TextMap Decimal]"; actual = "TextMap Decimal"
 
+-- | A field read as `Optional a` is `Right None` for `AVNull` and `Right Some`
+-- for a value at `a`. An absent key stays `Missing`: an optional field still
+-- has one form, and a payload using the other is reported, not absorbed.
+testOptional : Script ()
+testOptional = do
+  lookupFieldEither "none" sample === Right (None : Optional Int)
+  lookupFieldEither "i" sample === Right (Some 42 : Optional Int)
+  lookupFieldEither "gaps" sample === Right ([Some 4.51, None, Some 4.53] : [Optional Decimal])
+  (lookupFieldEither "absent" sample : Either LookupError (Optional Int)) === Left Missing
+  (lookupFieldEither "t" sample : Either LookupError (Optional Int))
+    === Left WrongType with expected = "Optional Int"; actual = "Text"
+  (lookupFieldEither "weights" sample : Either LookupError (Optional (TextMap Int)))
+    === Left WrongType with expected = "Optional (TextMap Int)"; actual = "TextMap Decimal"
+
+-- | `AVNull` read at a type that is not `Optional` is `NoValue`, whatever the
+-- type: the field was sent without a value, which is neither of the other two
+-- failures.
+testNoValue : Script ()
+testNoValue = do
+  (lookupFieldEither "none" sample : Either LookupError Int) === Left NoValue
+  (lookupFieldEither "none" sample : Either LookupError Text) === Left NoValue
+  (lookupFieldEither "none" sample : Either LookupError [Decimal]) === Left NoValue
+
+-- | Inside a list or map, `AVNull` beside one other type names the collection
+-- after that type's `Optional`, so a series with gaps read as plain `[Decimal]`
+-- says what it holds. A collection of nulls alone holds `Null`.
+testWrongTypeWithNulls : Script ()
+testWrongTypeWithNulls = do
+  (lookupFieldEither "gaps" sample : Either LookupError [Decimal])
+    === Left WrongType with expected = "[Decimal]"; actual = "[Optional Decimal]"
+  (lookupFieldEither "nulls" sample : Either LookupError [Int])
+    === Left WrongType with expected = "[Int]"; actual = "[Null]"
+  (lookupFieldEither "bids" sample : Either LookupError (TextMap (TextMap Int)))
+    === Left WrongType with expected = "TextMap (TextMap Int)"; actual = "TextMap (Optional (TextMap AnyValue))"
+  (lookupFieldEither "gaps" sample : Either LookupError [Optional Int])
+    === Left WrongType with expected = "[Optional Int]"; actual = "[Optional Decimal]"
+
 -- | Every case above, read through `lookupField` too: it is `Some` exactly when
 -- `lookupFieldEither` is `Right`, with the same value, so the new read changes
 -- nothing about the old one.
@@ -117,6 +159,9 @@ testAgreesWithLookupField = do
   agree (None : Optional [AnyValue]) payload
   agree (None : Optional (TextMap Decimal)) payload
   agree (None : Optional (TextMap [Int])) payload
+  agree (None : Optional (Optional Int)) payload
+  agree (None : Optional (Optional Decimal)) payload
+  agree (None : Optional [Optional Decimal]) payload
 
 agree : forall v. (FromAnyValue v, ExpectedType v, Eq v, Show v) => Optional v -> Values -> Script ()
 agree _ payload = forA_ ("absent" :: map fst (TM.toList payload)) $ \key ->

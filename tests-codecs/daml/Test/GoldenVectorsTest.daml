@@ -113,6 +113,23 @@ testGoldenDate = do
         ]
   (hash (AVMap values)).value === "56201bbf1f6ba12d521c28e60fa05850c582abf081b2375ae58bdc7f24982788"
 
+-- | A null hashes as the `null` tag with no fields, `sha256("null|0")`. The two
+-- map vectors are one observation written both ways an optional field can be:
+-- with `info` absent and with `info` set to `AVNull`. Their hashes differ, which
+-- is why a schema fixes one form per optional field. The list vector is a
+-- series with a gap, which only `AVNull` can express.
+testGoldenNull : Script ()
+testGoldenNull = do
+  dateToDays (date 2026 Aug 1) === 20666
+  (hash AVNull).value === "0f9b5a7e1640ac324ace7b13acb836f5f2e28c782aef5be9ac97823a402d7376"
+  let absent = TM.fromList
+        [ ("date", AVDate (date 2026 Aug 1))
+        , ("value", AVDecimal 4.51)
+        ]
+  (hash (AVMap absent)).value === "40912db756996f1d5b6f871d717da6448cd36fb2b475098caef42c9dc36b168e"
+  (hash (AVMap (TM.insert "info" AVNull absent))).value === "110fa202c014a4dd7d915926b6c29bf7447d6de1d107e3747122ddf96d727f76"
+  (hash (AVList [AVDecimal 4.51, AVNull, AVDecimal 4.53])).value === "88c1b4e04a38909766fb569360fd2296ec919188139a4e8293210ab634a5e604"
+
 -- | A flat map of one value of every scalar type, including negatives.
 testGoldenFlat : Script ()
 testGoldenFlat = do
