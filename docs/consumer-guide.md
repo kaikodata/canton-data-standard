@@ -108,8 +108,12 @@ signed the contract and cannot be forged. Everything else is your decision.
   `Optional` type: `lookupField "bid" v.values : Optional (Optional Decimal)` is
   `Some (Some p)` for a value, `Some None` for `AVNull`, and `None` for an
   absent key. Absent and `AVNull` are different payloads with different hashes,
-  and the schema says which form each optional field uses; on the pull path,
-  rebuild the payload in exactly that form, or the signature will not verify.
+  and the schema says which form each optional field uses. To check the form
+  rather than accept both, read an `AVNull`-form field with `lookupFieldEither`
+  at `Optional a` (an absent key is `Missing`) and an absent-form field with
+  `lookupOmittableFieldEither` at `a` (an `AVNull` is `NoValue`). On the pull
+  path, rebuild the payload in exactly the schema's form, with `insertField` or
+  `insertOmittableField`, or the signature will not verify.
 
 Unknown `values` fields and unknown `metadata` keys are normal; ignoring what
 you do not understand is what keeps an old consumer working against a newer

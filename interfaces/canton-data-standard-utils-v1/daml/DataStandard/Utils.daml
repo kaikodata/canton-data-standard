@@ -17,9 +17,10 @@ import qualified DA.TextMap as TM
 -- | The closed, recursive set of values a `Values` payload may hold: the
 -- scalars and a null, plus an ordered list and a string-keyed map, so a
 -- structured payload such as an index's constituents is expressible. The
--- standard decides which constructors exist; a distributor cannot add one. Closing the set gives every
--- value a single canonical hash, which is what the pull path relies on when it
--- reconstructs a payload on-ledger to check a signature.
+-- standard decides which constructors exist; a distributor cannot add one.
+-- Closing the set gives every value a single canonical hash, which is what the
+-- pull path relies on when it reconstructs a payload on-ledger to check a
+-- signature.
 data AnyValue
   = AVInt Int
   | AVDecimal Decimal
@@ -130,8 +131,11 @@ instance FromAnyValue a => FromAnyValue (TextMap a) where
 -- | An optional value: `None` is `AVNull`, and `Some v` is `v` as it would be
 -- tagged on its own, so `Optional Int` holds `AVInt` or `AVNull`. A value of
 -- another type is still a failed read, never `None`.
--- `AVNull` reads as the outer `None`, so a nested `Optional (Optional a)` does
--- not round-trip `Some None`.
+--
+-- There is one level of `Optional`: `AVNull` reads as the outer `None` of any
+-- nesting, so `Some None : Optional (Optional a)` is written as `AVNull` and
+-- reads back as `None`. A schema declares an optional field at `Optional a`
+-- for an `a` that is not itself an `Optional`.
 instance ToAnyValue a => ToAnyValue (Optional a) where
   toAny None     = AVNull
   toAny (Some v) = toAny v
@@ -231,6 +235,16 @@ traverseTextMap f m =
 -- `ToAnyValue` instance.
 insertField : ToAnyValue v => Text -> v -> Values -> Values
 insertField key v = TM.insert key (toAny v)
+
+-- | Insert an optional field in the form that leaves the key out when there is
+-- no value: `Some v` is inserted as `insertField` would insert `v`, and `None`
+-- removes the key. `insertField` on an `Optional` writes the other form, `None`
+-- as `AVNull`. The two hash differently, so a schema fixes one per optional
+-- field and a producer writes it with the matching function.
+insertOmittableField : ToAnyValue v => Text -> Optional v -> Values -> Values
+insertOmittableField key ov row = case ov of
+  None -> TM.delete key row
+  Some v -> insertField key v row
 
 -- | Read a field from a payload at its expected type. `None` when the field is
 -- absent or holds a different type.
