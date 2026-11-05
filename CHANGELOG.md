@@ -3,12 +3,7 @@
 Notable changes to the Canton Data Standard packages, newest first. All packages
 share one version line while the standard is pre-release.
 
-## [0.3.0] — unreleased
-
-Not yet tagged: the 0.3.0 DARs in `dars/` are rebuilt in place as entries land
-here, so their package ids are not final until the release. Do not upload them
-to a shared participant before then; a participant rejects a later 0.3.0 build
-with a different package id under the same name and version.
+## [0.3.0] — 2026-11-05
 
 ### Added
 
@@ -74,9 +69,10 @@ with a different package id under the same name and version.
   is a reference price with no trade size attached, derived by a methodology
   the distributor documents in `metadata` on the push path and out of band on
   the pull path, where a signed payload carries no `metadata`; a price
-  executable at a given size belongs under a schema of its own. For a price derived from a pool or an order
-  book, `priceTime` is the time of the last trade or book change the price
-  reflects, not the time the distributor read it.
+  executable at a given size belongs under a schema of its own. For a price
+  derived from a pool or an order book, `priceTime` is the time of the last
+  trade or book change the price reflects, not the time the distributor read
+  it.
 - `quote-consumer` and `distributor-key-consumer` bound the age of the quote's
   `priceTime` as well as `publishedAt` (`"price too stale"`), so a fresh
   publication of a market that has stopped trading is rejected. The market age
@@ -85,7 +81,7 @@ with a different package id under the same name and version.
   `publishedAt` is rejected (`"price time after publication"`), so a negative
   market age cannot read as fresh.
 
-## [0.2.0]
+## [0.2.0] — 2026-09-16
 
 ### Interfaces
 
